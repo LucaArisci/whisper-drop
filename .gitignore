@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+.DS_Store
+Thumbs.db
+.vite/
+*.tsbuildinfo
+public/models/*.bin
+public/models/*.part
+public/vendor/

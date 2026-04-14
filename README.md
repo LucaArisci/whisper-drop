@@ -1,115 +1,80 @@
-# whisper-drop
+# WhisperDrop PWA
 
-A minimal macOS app to transcribe audio files with drag & drop, powered by [whisper.cpp](https://github.com/ggerganov/whisper.cpp) and quantized GGML models.
+WhisperDrop is a local-first Progressive Web App that keeps transcription on the device after the initial app and model download.
 
----
+## What is included
 
-## Features
+- React + Vite + TypeScript frontend
+- Installable PWA shell with offline app caching
+- Drag/drop and file-picker audio upload
+- Browser-side decode + resample to 16 kHz mono
+- Dedicated transcription worker boundary
+- Browser-cached Whisper models powered by Transformers.js + ONNX Runtime Web
+- Transcript preview, copy, and `.txt` export
+- Original macOS/Tkinter implementation preserved in `legacy/`
 
-- Drag & drop any audio or video file onto the window
-- Supports `.mp3`, `.wav`, `.m4a`, `.ogg`, `.flac`, `.opus`, `.webm`, `.mp4`, `.aac`
-- Quantized models (Q5/Q8) — faster and lighter than standard Whisper on CPU
-- Models are downloaded automatically on first use and cached locally
-- Outputs a `.txt` file saved next to the original audio
-- No technical knowledge required to use
+## Important note about the inference runtime
 
----
+The browser runtime uses `@xenova/transformers` with ONNX Runtime Web in a dedicated worker. Model files are downloaded from Hugging Face the first time you install a model, then cached by the browser so later runs can stay local and work offline.
 
-## Requirements
+The app always transcribes from the local browser cache after installation. If you clear site data or browser cache, install the model again before running another transcript.
 
-- macOS (Apple Silicon or Intel)
-- Internet connection for the first setup and first use of each model
+Audio is decoded on the main thread, resampled to 16 kHz mono, and then transferred to the worker so long files do not incur an extra structured-clone copy before inference starts.
 
----
+## Deploying to Vercel
 
-## Installation
+WhisperDrop is intended to deploy to Vercel as a static frontend, not as a server-side transcription service.
 
-Clone the repo:
+In production:
+
+- Vercel serves the app shell, worker bundle, PWA files, and `/ort/*` WASM assets.
+- The visitor browser downloads Whisper model files directly from Hugging Face.
+- The visitor browser runs decoding and inference locally in the worker.
+- Audio files should never be uploaded to a Vercel Function for transcription.
+
+The repository now includes `vercel.json` for Vercel-native headers and SPA rewrites. A detailed deployment checklist lives in `docs/vercel-deployment-plan.md`.
+
+### Vercel project settings
+
+Use these settings when you create the project in Vercel:
+
+- Framework preset: `Vite`
+- Install command: `npm install` or `npm ci`
+- Build command: `npm run build`
+- Output directory: `dist`
+- Node version: `20+`
+
+### Vercel verification checklist
+
+After the first deployment:
+
+1. Open the deployed site and confirm the worker becomes ready.
+2. Verify `/ort/*` is served from your Vercel domain.
+3. Install a model and confirm the download happens in the browser from Hugging Face.
+4. Upload a short audio file and run a transcript.
+5. Confirm the transcript renders and `.txt` export works.
+6. Confirm the deployment contains no serverless functions for inference.
+
+## Development
 
 ```bash
-git clone https://github.com/your-username/whisper-drop.git
-cd whisper-drop
-chmod +x setup.sh
-chmod +x WhisperDrop.command
-chmod +x WhisperDrop_installer.command
+npm install
+npm run dev
 ```
 
-Then run the installer:
+The dev server binds to `http://127.0.0.1:5173`.
 
-```bash
-./setup.sh
-```
+## Local ONNX assets
 
-Or double-click `WhisperDrop_installer.command` from Finder.
+The app expects these ONNX Runtime WebAssembly assets to be served from `public/ort/`:
 
-This will automatically install:
+- `ort-wasm.wasm`
+- `ort-wasm-threaded.wasm`
+- `ort-wasm-simd.wasm`
+- `ort-wasm-simd-threaded.wasm`
 
-- [Homebrew](https://brew.sh)
-- ffmpeg
-- whisper.cpp (`whisper-cli`)
-- Python 3.11
-- tkinterdnd2 (in a local `.venv`)
+They are copied from `node_modules/@xenova/transformers/dist/` so the worker can load ONNX Runtime from the same origin instead of falling back to a CDN.
 
-> **Note:** Setup takes a few minutes the first time.
+## Legacy desktop app
 
----
-
-## Usage
-
-Double-click `WhisperDrop.command` to open the app.
-
-> **On first launch**, `WhisperDrop.command` will run setup automatically if it hasn't been done yet.
-
-> **Gatekeeper warning:** macOS may block `.command` files downloaded from the internet. If you see a *"Not Opened"* warning, click **Done**, then run this once in Terminal:
->
-> ```bash
-> xattr -d com.apple.quarantine /path/to/WhisperDrop.command
-> xattr -d com.apple.quarantine /path/to/WhisperDrop_installer.command
-> ```
-
-Once the app is open:
-
-1. Drag & drop an audio file onto the window (or click to browse)
-2. Select the language and model
-3. Click **Start Transcription**
-4. The `.txt` file is saved in the same folder as the original audio
-
----
-
-## Models
-
-Models are downloaded from [HuggingFace](https://huggingface.co/ggerganov/whisper.cpp) on first use and cached in `.models/whisper.cpp/` inside the app folder.
-
-
-| Model     | Size    | Speed   | Best for                         |
-| --------- | ------- | ------- | -------------------------------- |
-| Tiny Q5   | ~32 MB  | Fastest | Older or slower hardware         |
-| Base Q5   | ~57 MB  | Fast    | Balanced choice for most users   |
-| Small Q5  | ~190 MB | Medium  | Better accuracy on complex audio |
-| Medium Q5 | ~515 MB | Slow    | High accuracy                    |
-| Turbo Q5  | ~547 MB | Fast    | Fast and accurate, recommended   |
-| Turbo Q8  | ~874 MB | Medium  | Maximum accuracy while quantized |
-
-
-**Turbo Q5** is the default and recommended for most use cases.
-
----
-
-## Project structure
-
-```
-whisper-drop/
-├── transcriber.py              # Main app
-├── WhisperDrop.command         # Launcher (double-click to open)
-├── WhisperDrop_installer.command  # Explicit installer
-├── setup.sh                    # Full setup script
-├── requirements.txt            # Python dependencies
-├── .venv/                      # Local Python environment (created by setup)
-└── .models/whisper.cpp/        # Cached GGML models (created on first use)
-```
-
----
-
-## License
-
-MIT
+The previous macOS desktop implementation is preserved in `legacy/` for reference during the migration.
