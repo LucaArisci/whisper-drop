@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-APP_DIR="$(cd "$(dirname "$0")" && pwd)"
+APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 VENV_DIR="$APP_DIR/.venv"
 REQ_FILE="$APP_DIR/requirements.txt"
 
