@@ -253,9 +253,10 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         options.grid(row=2, column=0, sticky="ew", pady=(18, 18))
         options.grid_columnconfigure(0, weight=1)
         options.grid_columnconfigure(1, weight=1)
+        options.grid_rowconfigure(0, weight=1)
 
         lang_card = tk.Frame(options, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
-        lang_card.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        lang_card.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         tk.Label(
             lang_card,
             text="Language",
