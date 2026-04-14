@@ -76,7 +76,7 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("WhisperDrop")
-        self.geometry("820x720")
+        self.geometry("820x900")
         self.minsize(720, 620)
         self.configure(bg=BG)
 
@@ -139,7 +139,7 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         tk.Label(
             header,
-            text="WhisperDrop",
+            text="WhisperDrop  🎙️",
             font=(UI_FONT, 24, "bold"),
             bg=BG,
             fg=TEXT,
@@ -159,8 +159,8 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         tk.Label(
             file_card,
-            text="File  📁",
-            font=(UI_FONT, 12, "bold"),
+            text="File",
+            font=(UI_FONT, 15, "bold"),
             bg=CARD,
             fg=TEXT,
         ).grid(row=0, column=0, sticky="w", padx=18, pady=(16, 6))
@@ -184,8 +184,8 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         self.drop_title = tk.Label(
             self.drop_zone,
-            text="Drop file here  🎧",
-            font=(UI_FONT, 16, "bold"),
+            text="Drop file here ➕",
+            font=(UI_FONT, 20, "bold"),
             bg=BG,
             fg=TEXT,
         )
@@ -260,7 +260,7 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         tk.Label(
             lang_card,
             text="Language",
-            font=(UI_FONT, 11, "bold"),
+            font=(UI_FONT, 15, "bold"),
             bg=CARD,
             fg=TEXT,
         ).pack(anchor="w", padx=16, pady=(14, 6))
@@ -278,8 +278,8 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         model_card.grid(row=0, column=1, sticky="ew", padx=(8, 0))
         tk.Label(
             model_card,
-            text="Model  ⚙️",
-            font=(UI_FONT, 11, "bold"),
+            text="Model",
+            font=(UI_FONT, 15, "bold"),
             bg=CARD,
             fg=TEXT,
         ).pack(anchor="w", padx=16, pady=(14, 6))
@@ -347,8 +347,8 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         tk.Label(
             log_card,
-            text="Log  📝",
-            font=(UI_FONT, 12, "bold"),
+            text="Log",
+            font=(UI_FONT, 15, "bold"),
             bg=CARD,
             fg=TEXT,
         ).grid(row=0, column=0, sticky="w", padx=18, pady=(16, 8))
