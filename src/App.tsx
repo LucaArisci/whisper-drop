@@ -363,7 +363,7 @@ export default function App() {
         <header className="app-header">
           <div className="brand-column">
             <p className="brand-tag">WhisperDrop</p>
-            <h1>Local transcription for OLED screens.</h1>
+            <h1>Local transcription in your browser.</h1>
             <p className="brand-copy">
               Upload audio, install a model once, and transcribe on the same device without
               routing recordings through a server.
