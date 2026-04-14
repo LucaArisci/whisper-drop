@@ -635,12 +635,21 @@ select:focus-visible,
   .workspace-grid {
     grid-template-columns: minmax(0, 1fr) minmax(20rem, 1.2fr) minmax(0, 1.1fr);
     gap: 1.25rem;
-    align-items: start;
+    align-items: stretch;
   }
 
   .panel-upload {
     grid-column: 1;
     grid-row: 1 / span 2;
+    align-self: stretch;
+    min-height: 0;
+    grid-template-rows: auto minmax(10rem, 1fr) auto auto;
+  }
+
+  .panel-upload .dropzone {
+    min-height: 10rem;
+    height: 100%;
+    align-self: stretch;
   }
 
   .panel-controls {
