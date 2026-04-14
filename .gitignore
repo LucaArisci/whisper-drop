@@ -1,0 +1,17 @@
+# Python virtual environment
+.venv/
+ 
+# Downloaded GGML models
+.models/
+ 
+# Python cache
+__pycache__/
+*.py[cod]
+ 
+# macOS metadata
+.DS_Store
+__MACOSX/
+ 
+# VS Code
+.vscode/
+ 
