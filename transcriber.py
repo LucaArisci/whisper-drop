@@ -208,22 +208,31 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         browse_row.grid(row=2, column=0, sticky="ew", padx=18, pady=(14, 12))
         browse_row.grid_columnconfigure(0, weight=1)
 
-        self.browse_btn = tk.Button(
+        self.browse_btn_frame = tk.Frame(
             browse_row,
+            bg=GREEN_SOFT,
+            highlightbackground=GREEN,
+            highlightthickness=1,
+            cursor="hand2",
+        )
+        self.browse_btn_frame.grid(row=0, column=0)
+
+        self.browse_btn = tk.Label(
+            self.browse_btn_frame,
             text="Browse File  📂",
-            command=self._browse_file,
             font=(UI_FONT, 13, "bold"),
-            bg=WHITE,
-            fg=BG,
-            activebackground=WHITE_SOFT,
-            activeforeground=BG,
-            bd=0,
+            bg=GREEN_SOFT,
+            fg=GREEN,
             padx=18,
             pady=14,
             cursor="hand2",
-            disabledforeground="#555555",
         )
-        self.browse_btn.grid(row=0, column=0)
+        self.browse_btn.pack()
+
+        self.browse_btn.bind("<Button-1>", self._browse_file)
+        self.browse_btn_frame.bind("<Button-1>", self._browse_file)
+        self.browse_btn.bind("<Enter>", lambda e: (self.browse_btn_frame.config(bg="#0f2e1a"), self.browse_btn.config(bg="#0f2e1a")))
+        self.browse_btn.bind("<Leave>", lambda e: (self.browse_btn_frame.config(bg=GREEN_SOFT), self.browse_btn.config(bg=GREEN_SOFT)))
 
         file_info = tk.Frame(file_card, bg=CARD)
         file_info.grid(row=3, column=0, sticky="ew", padx=18, pady=(0, 18))
@@ -308,22 +317,32 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         action_card.grid(row=3, column=0, sticky="ew", pady=(0, 18))
         action_card.grid_columnconfigure(0, weight=1)
 
-        self.run_btn = tk.Button(
+        self.run_btn_frame = tk.Frame(
             action_card,
+            bg=GREEN_SOFT,
+            highlightbackground=GREEN,
+            highlightthickness=1,
+            cursor="hand2",
+        )
+        self.run_btn_frame.grid(row=0, column=0, sticky="ew", padx=18, pady=(18, 10))
+        self.run_btn_frame.grid_columnconfigure(0, weight=1)
+
+        self.run_btn = tk.Label(
+            self.run_btn_frame,
             text="Start Transcription  ▶️",
-            command=self._run_transcription,
             font=(UI_FONT, 13, "bold"),
-            bg=GREEN,
-            fg=BG,
-            activebackground=GREEN_DARK,
-            activeforeground=BG,
-            bd=0,
+            bg=GREEN_SOFT,
+            fg=GREEN,
             padx=18,
             pady=14,
             cursor="hand2",
-            disabledforeground="#555555",
         )
-        self.run_btn.grid(row=0, column=0, sticky="ew", padx=18, pady=(18, 10))
+        self.run_btn.pack(fill="x")
+
+        self.run_btn.bind("<Button-1>", lambda e: self._run_transcription())
+        self.run_btn_frame.bind("<Button-1>", lambda e: self._run_transcription())
+        self.run_btn.bind("<Enter>", lambda e: (self.run_btn_frame.config(bg="#0f2e1a"), self.run_btn.config(bg="#0f2e1a")))
+        self.run_btn.bind("<Leave>", lambda e: (self.run_btn_frame.config(bg=GREEN_SOFT), self.run_btn.config(bg=GREEN_SOFT)))
 
         self.progress = ttk.Progressbar(action_card, mode="indeterminate", style="App.Horizontal.TProgressbar")
 
@@ -573,14 +592,22 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
     def _set_busy(self, busy):
         if busy:
-            self.run_btn.config(state="disabled", text="Transcribing...  ⏳", bg=GREEN_DARK, fg=BG)
+            self.run_btn.config(text="Transcribing...  ⏳", fg=MUTED)
+            self.run_btn_frame.config(cursor="")
+            self.run_btn.config(cursor="")
+            self.run_btn.unbind("<Button-1>")
+            self.run_btn_frame.unbind("<Button-1>")
             self.progress.grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 10))
             self.progress.start(10)
             self._set_status("Transcription in progress...", "neutral")
         else:
+            self.run_btn.config(text="Start Transcription  ▶️", fg=GREEN)
+            self.run_btn_frame.config(cursor="hand2")
+            self.run_btn.config(cursor="hand2")
+            self.run_btn.bind("<Button-1>", lambda e: self._run_transcription())
+            self.run_btn_frame.bind("<Button-1>", lambda e: self._run_transcription())
             self.progress.stop()
             self.progress.grid_forget()
-            self.run_btn.config(state="normal", text="Start Transcription  ▶️", bg=GREEN, fg=BG)
 
     def _run_transcription(self):
         if not self.file_path:
