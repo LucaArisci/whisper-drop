@@ -206,24 +206,24 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         browse_row = tk.Frame(file_card, bg=CARD)
         browse_row.grid(row=2, column=0, sticky="ew", padx=18, pady=(14, 12))
-        browse_row.grid_columnconfigure(1, weight=1)
+        browse_row.grid_columnconfigure(0, weight=1)
 
         self.browse_btn = tk.Button(
             browse_row,
             text="Browse File  📂",
             command=self._browse_file,
-            font=(UI_FONT, 11, "bold"),
+            font=(UI_FONT, 13, "bold"),
             bg=WHITE,
             fg=BG,
             activebackground=WHITE_SOFT,
             activeforeground=BG,
             bd=0,
             padx=18,
-            pady=10,
+            pady=14,
             cursor="hand2",
             disabledforeground="#555555",
         )
-        self.browse_btn.grid(row=0, column=0, sticky="w")
+        self.browse_btn.grid(row=0, column=0)
 
         file_info = tk.Frame(file_card, bg=CARD)
         file_info.grid(row=3, column=0, sticky="ew", padx=18, pady=(0, 18))
