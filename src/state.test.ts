@@ -6,5 +6,6 @@ describe("initialAppState", () => {
     expect(initialAppState.selectedFile).toBeNull();
     expect(initialAppState.transcript).toBeNull();
     expect(initialAppState.busy).toBe(false);
+    expect(initialAppState.transcriptionBackend).toBe("transformers");
   });
 });

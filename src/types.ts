@@ -1,3 +1,11 @@
+export type TranscriptionBackendId = "transformers" | "whispercpp";
+
+export interface WhisperCppRuntimeCapabilities {
+  crossOriginIsolated: boolean;
+  simd: boolean;
+  pthreads: boolean;
+}
+
 export type LanguageCode = "auto" | "it" | "en" | "fr" | "de" | "es" | "pt";
 
 export interface ModelDefinition {
@@ -15,6 +23,10 @@ export interface TranscriptionRequest {
   modelId: string;
   chunkSeconds: number;
   overlapSeconds: number;
+  /** whisper.cpp only — thread count passed to WASM binding */
+  threads?: number;
+  /** whisper.cpp only — translate to English */
+  translate?: boolean;
 }
 
 export interface DecodedAudioPayload {
@@ -23,7 +35,13 @@ export interface DecodedAudioPayload {
   durationSeconds: number;
 }
 
-export type ProgressStage = "download" | "decode" | "transcribe" | "finalize";
+export type ProgressStage =
+  | "bootstrap"
+  | "download"
+  | "decode"
+  | "prepare"
+  | "transcribe"
+  | "finalize";
 
 export interface TranscriptionProgress {
   stage: ProgressStage;
@@ -51,7 +69,7 @@ export interface TranscriptResult {
 
 export type WorkerRequestMessage =
   | { type: "init" }
-  | { type: "ensureModel"; modelId: string }
+  | { type: "ensureModel"; modelId: string; downloadUrl?: string; sizeBytes?: number }
   | { type: "deleteModel"; modelId: string }
   | {
       type: "transcribe";
@@ -62,7 +80,11 @@ export type WorkerRequestMessage =
   | { type: "cancel" };
 
 export type WorkerEventMessage =
-  | { type: "ready"; available: boolean }
+  | {
+      type: "ready";
+      available: boolean;
+      capabilities?: WhisperCppRuntimeCapabilities;
+    }
   | { type: "modelState"; state: ModelInstallState }
   | { type: "progress"; progress: TranscriptionProgress }
   | { type: "result"; result: TranscriptResult }

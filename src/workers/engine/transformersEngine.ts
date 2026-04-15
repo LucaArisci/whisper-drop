@@ -142,7 +142,15 @@ function relayModelLoadProgress(
     trackedValues.length > 0
       ? trackedValues.reduce((sum, value) => sum + value, 0) / trackedValues.length
       : 0;
-  const percent = Math.max(downloadProgressTracker.lastPercent, aggregatePercent);
+  let percent = Math.max(downloadProgressTracker.lastPercent, aggregatePercent);
+  if (
+    (progressInfo.status === "initiate" ||
+      progressInfo.status === "download" ||
+      progressInfo.status === "progress") &&
+    percent < 1
+  ) {
+    percent = Math.max(percent, 2);
+  }
   downloadProgressTracker.lastPercent = percent;
 
   const fileSummary =

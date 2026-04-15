@@ -1,5 +1,9 @@
 import { MODELS } from "../constants";
-import type { ModelDefinition, ModelInstallState } from "../types";
+import type {
+  ModelDefinition,
+  ModelInstallState,
+  TranscriptionBackendId
+} from "../types";
 
 const DB_NAME = "whisper-drop";
 const META_STORE_NAME = "meta";
@@ -10,6 +14,7 @@ type MetaRecord = {
   lastModelId?: string;
   lastLanguage?: string;
   installedModels?: Record<string, number>;
+  lastTranscriptionBackend?: TranscriptionBackendId;
 };
 
 async function openIndexedDb(): Promise<IDBDatabase> {
@@ -58,6 +63,16 @@ export async function persistLastSelections(
     ...meta,
     lastModelId: modelId,
     lastLanguage: language
+  });
+}
+
+export async function persistTranscriptionBackend(
+  backend: TranscriptionBackendId
+): Promise<void> {
+  const meta = await getMeta();
+  await setMeta({
+    ...meta,
+    lastTranscriptionBackend: backend
   });
 }
 

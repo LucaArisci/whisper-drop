@@ -5,11 +5,23 @@ import { VitePWA } from "vite-plugin-pwa";
 export default defineConfig({
   server: {
     host: "127.0.0.1",
-    strictPort: true
+    // Not 5173/5713: prefer this port; if busy Vite picks the next free one (strictPort: false).
+    port: 24680,
+    strictPort: false,
+    headers: {
+      "Cross-Origin-Opener-Policy": "same-origin",
+      // credentialless keeps cross-origin fetch usable without CORP on CDNs while enabling isolation features.
+      "Cross-Origin-Embedder-Policy": "credentialless"
+    }
   },
   preview: {
     host: "127.0.0.1",
-    strictPort: true
+    port: 27272,
+    strictPort: false,
+    headers: {
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Cross-Origin-Embedder-Policy": "credentialless"
+    }
   },
   plugins: [
     react(),
@@ -50,6 +62,16 @@ export default defineConfig({
               cacheName: "ort-cache",
               expiration: {
                 maxEntries: 4
+              }
+            }
+          },
+          {
+            urlPattern: ({ url }) => url.pathname.startsWith("/whispercpp/"),
+            handler: "CacheFirst",
+            options: {
+              cacheName: "whispercpp-static",
+              expiration: {
+                maxEntries: 8
               }
             }
           }

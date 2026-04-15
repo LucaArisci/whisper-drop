@@ -18,14 +18,42 @@ import {
   getModelRuntimeWarning,
   getReportedDeviceMemory
 } from "./lib/runtime-support";
-import { getMeta, persistLastSelections } from "./lib/storage";
+import { getWhisperCppBackendWarning } from "./lib/runtime-capabilities";
+import {
+  getMeta,
+  persistLastSelections,
+  persistTranscriptionBackend
+} from "./lib/storage";
+import { DEFAULT_TRANSCRIPTION_BACKEND, TRANSCRIPTION_BACKENDS } from "./lib/transcription-backend";
+import {
+  getWhisperCppModelDefinition,
+  whisperCppModelDownloadUrl,
+  WHISPER_CPP_MODELS
+} from "./lib/whispercpp-models";
+import { WhisperCppWorkerClient } from "./lib/whispercpp-worker-client";
 import { TranscriptionWorkerClient, type WorkerListeners } from "./lib/worker-client";
 import { initialAppState } from "./state";
-import type { TranscriptResult } from "./types";
+import type { TranscriptionBackendId, TranscriptResult } from "./types";
 
 function transcriptFileName(source: File | null): string {
   const base = source?.name.replace(/\.[^/.]+$/, "") ?? "transcript";
   return `${base}.txt`;
+}
+
+function modelsForBackend(backend: TranscriptionBackendId) {
+  return backend === "whispercpp" ? WHISPER_CPP_MODELS : MODELS;
+}
+
+function defaultModelIdForBackend(backend: TranscriptionBackendId): string {
+  return modelsForBackend(backend)[0]?.id ?? DEFAULT_MODEL_ID;
+}
+
+function applyLanguageToOutputName(outputName: string, language: string): string {
+  if (language === "auto") {
+    return outputName;
+  }
+
+  return `${outputName.replace(/\.txt$/i, "")}.${language}.txt`;
 }
 
 function describeProgress(
@@ -50,17 +78,21 @@ function describeProgress(
 
 export default function App() {
   const installState = useInstallPrompt();
-  const workerRef = useRef<TranscriptionWorkerClient | null>(null);
+  const workerRef = useRef<TranscriptionWorkerClient | WhisperCppWorkerClient | null>(null);
+  const backendRef = useRef<TranscriptionBackendId>(initialAppState.transcriptionBackend);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [state, setState] = useState(initialAppState);
   const [dragging, setDragging] = useState(false);
 
+  backendRef.current = state.transcriptionBackend;
+
   const workerListeners: WorkerListeners = {
-    onReady: (available) => {
+    onReady: (available, capabilities) => {
       setState((current) => ({
         ...current,
         workerReady: true,
-        localRuntime: available
+        localRuntime: available,
+        whisperCapabilities: capabilities ?? current.whisperCapabilities
       }));
     },
     onModelState: (modelState) => {
@@ -98,7 +130,13 @@ export default function App() {
     onResult: (result) => {
       setState((current) => ({
         ...current,
-        transcript: result,
+        transcript: {
+          ...result,
+          outputName:
+            current.transcriptionBackend === "whispercpp"
+              ? applyLanguageToOutputName(result.outputName, current.language)
+              : result.outputName
+        },
         busy: false,
         error: null,
         progress: {
@@ -118,7 +156,15 @@ export default function App() {
     }
   };
 
-  function bootWorker(): TranscriptionWorkerClient {
+  function bootWorker(backend: TranscriptionBackendId): TranscriptionWorkerClient | WhisperCppWorkerClient {
+    workerRef.current?.terminate();
+    if (backend === "whispercpp") {
+      const worker = new WhisperCppWorkerClient(workerListeners);
+      workerRef.current = worker;
+      worker.post({ type: "init" });
+      return worker;
+    }
+
     const worker = new TranscriptionWorkerClient(workerListeners);
     workerRef.current = worker;
     worker.post({ type: "init" });
@@ -127,7 +173,7 @@ export default function App() {
 
   function resetWorker(): void {
     workerRef.current?.terminate();
-    bootWorker();
+    bootWorker(backendRef.current);
   }
 
   useEffect(() => {
@@ -144,13 +190,16 @@ export default function App() {
         return;
       }
 
+      const backend = meta.lastTranscriptionBackend ?? DEFAULT_TRANSCRIPTION_BACKEND;
+      const catalog = modelsForBackend(backend);
       const modelId =
-        meta.lastModelId && MODELS.some((model) => model.id === meta.lastModelId)
+        meta.lastModelId && catalog.some((model) => model.id === meta.lastModelId)
           ? meta.lastModelId
-          : DEFAULT_MODEL_ID;
+          : defaultModelIdForBackend(backend);
 
       setState((current) => ({
         ...current,
+        transcriptionBackend: backend,
         modelId,
         language: meta.lastLanguage ?? DEFAULT_LANGUAGE
       }));
@@ -162,21 +211,24 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const worker = bootWorker();
+    const worker = bootWorker(state.transcriptionBackend);
 
     return () => {
       worker.terminate();
       workerRef.current = null;
     };
-  }, []);
+  }, [state.transcriptionBackend]);
+
+  const modelCatalog = useMemo(() => modelsForBackend(state.transcriptionBackend), [state.transcriptionBackend]);
 
   const selectedModel = useMemo(
-    () => MODELS.find((model) => model.id === state.modelId) ?? MODELS[0],
-    [state.modelId]
+    () => modelCatalog.find((model) => model.id === state.modelId) ?? modelCatalog[0],
+    [modelCatalog, state.modelId]
   );
   const reportedDeviceMemory = useMemo(() => getReportedDeviceMemory(), []);
   const activeModelState = state.models[state.modelId];
-  const installedModelCount = MODELS.filter((model) => state.models[model.id]?.installed).length;
+  const installedModelCount = modelCatalog.filter((model) => state.models[model.id]?.installed).length;
+  const whisperCppWarning = getWhisperCppBackendWarning(state.whisperCapabilities);
   const selectedLanguage =
     LANGUAGE_OPTIONS.find((option) => option.value === state.language) ?? LANGUAGE_OPTIONS[0];
   const transcriptWordCount = state.transcript?.text.trim().split(/\s+/).filter(Boolean).length ?? 0;
@@ -190,11 +242,13 @@ export default function App() {
     state.selectedFile &&
       activeModelState?.installed &&
       !state.busy &&
-      !selectedModelRuntimeWarning &&
-      !autoLanguageWarning
+      !autoLanguageWarning &&
+      (state.transcriptionBackend !== "whispercpp" || !whisperCppWarning)
   );
   const canInstallSelectedModel = Boolean(
-    !state.busy && !activeModelState?.installed && !selectedModelRuntimeWarning
+    !state.busy &&
+      !activeModelState?.installed &&
+      (state.transcriptionBackend !== "whispercpp" || !whisperCppWarning)
   );
   const progressValue = state.progress?.percent ?? 0;
   const progressDetails = state.progress?.chunkCount
@@ -275,17 +329,7 @@ export default function App() {
   };
 
   const ensureModel = (modelId: string) => {
-    const model = MODELS.find((entry) => entry.id === modelId) ?? MODELS[0];
-    const runtimeWarning = getModelRuntimeWarning(model, reportedDeviceMemory);
-    if (runtimeWarning) {
-      setState((current) => ({
-        ...current,
-        modelId,
-        error: runtimeWarning
-      }));
-      return;
-    }
-
+    const model = modelCatalog.find((entry) => entry.id === modelId) ?? modelCatalog[0];
     setState((current) => ({
       ...current,
       modelId,
@@ -296,6 +340,17 @@ export default function App() {
         message: "Preparing model download..."
       }
     }));
+    if (state.transcriptionBackend === "whispercpp") {
+      const cppModel = getWhisperCppModelDefinition(modelId);
+      workerRef.current?.post({
+        type: "ensureModel",
+        modelId,
+        downloadUrl: whisperCppModelDownloadUrl(cppModel),
+        sizeBytes: cppModel.sizeBytes
+      });
+      return;
+    }
+
     workerRef.current?.post({
       type: "ensureModel",
       modelId
@@ -307,14 +362,6 @@ export default function App() {
       setState((current) => ({
         ...current,
         error: autoLanguageWarning
-      }));
-      return;
-    }
-
-    if (selectedModelRuntimeWarning) {
-      setState((current) => ({
-        ...current,
-        error: selectedModelRuntimeWarning
       }));
       return;
     }
@@ -360,15 +407,25 @@ export default function App() {
       });
 
       await persistLastSelections(state.modelId, state.language);
+      const baseRequest = {
+        language: state.language as typeof DEFAULT_LANGUAGE,
+        modelId: state.modelId,
+        chunkSeconds: DEFAULT_CHUNK_SECONDS,
+        overlapSeconds: DEFAULT_OVERLAP_SECONDS
+      };
+      const request =
+        state.transcriptionBackend === "whispercpp"
+          ? {
+              ...baseRequest,
+              threads: Math.min(8, Math.max(1, Math.floor(navigator.hardwareConcurrency || 4))),
+              translate: false
+            }
+          : baseRequest;
+
       workerRef.current?.post(
         {
           type: "transcribe",
-          request: {
-            language: state.language as typeof DEFAULT_LANGUAGE,
-            modelId: state.modelId,
-            chunkSeconds: DEFAULT_CHUNK_SECONDS,
-            overlapSeconds: DEFAULT_OVERLAP_SECONDS
-          },
+          request,
           audio: decoded,
           outputName: transcriptFileName(state.selectedFile)
         },
@@ -442,8 +499,8 @@ export default function App() {
             </div>
             <div className="status-chip">
               <span className="status-dot status-dot-green" />
-              <span>
-                {installedModelCount}/{MODELS.length} models installed
+                <span>
+                {installedModelCount}/{modelCatalog.length} models installed
               </span>
             </div>
             {state.installState.canInstall ? (
@@ -569,6 +626,38 @@ export default function App() {
             </div>
 
             <div className="control-grid">
+              <label className="control-field" htmlFor="backend">
+                <span>Inference engine</span>
+                <select
+                  id="backend"
+                  value={state.transcriptionBackend}
+                  onChange={(event) => {
+                    const backend = event.target.value as TranscriptionBackendId;
+                    void persistTranscriptionBackend(backend);
+                    setState((current) => ({
+                      ...current,
+                      transcriptionBackend: backend,
+                      modelId: defaultModelIdForBackend(backend),
+                      models: {},
+                      transcript: null,
+                      error: null,
+                      workerReady: false,
+                      localRuntime: false,
+                      whisperCapabilities: null
+                    }));
+                  }}
+                >
+                  {TRANSCRIPTION_BACKENDS.map((entry) => (
+                    <option key={entry.id} value={entry.id}>
+                      {entry.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="control-hint">
+                  {TRANSCRIPTION_BACKENDS.find((entry) => entry.id === state.transcriptionBackend)?.description}
+                </p>
+              </label>
+
               <label className="control-field" htmlFor="language">
                 <span>Language</span>
                 <select
@@ -591,6 +680,10 @@ export default function App() {
                 {autoLanguageWarning ? <p className="inline-error">{autoLanguageWarning}</p> : null}
               </label>
 
+              {state.transcriptionBackend === "whispercpp" && whisperCppWarning ? (
+                <p className="inline-error control-grid-full">{whisperCppWarning}</p>
+              ) : null}
+
               <label className="control-field" htmlFor="model">
                 <span>Selected model</span>
                 <select
@@ -603,7 +696,7 @@ export default function App() {
                     }))
                   }
                 >
-                  {MODELS.map((model) => (
+                  {modelCatalog.map((model) => (
                     <option key={model.id} value={model.id}>
                       {model.label}
                     </option>
@@ -643,7 +736,7 @@ export default function App() {
             </article>
 
             <div className="model-list" role="list" aria-label="Available transcription models">
-              {MODELS.map((model) => {
+              {modelCatalog.map((model) => {
                 const install = state.models[model.id];
                 const installed = Boolean(install?.installed);
                 const pending = Boolean(install?.pending);
@@ -696,7 +789,7 @@ export default function App() {
                           className="ghost-button"
                           type="button"
                           onClick={() => ensureModel(model.id)}
-                          disabled={state.busy || pending || Boolean(runtimeWarning)}
+                        disabled={state.busy || pending}
                         >
                           {pending ? "Downloading..." : "Download"}
                         </button>

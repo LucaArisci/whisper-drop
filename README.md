@@ -28,7 +28,11 @@ npm install
 npm run dev
 ```
 
-The dev server binds to `http://127.0.0.1:5173`.
+### Test audio
+
+A short MP3 for manual checks lives at `public/fixtures/sample.mp3` (drag it into WhisperDrop or pick it from disk). To verify Hugging Face can stream whisper models from your network: `npm run verify:whisper-hf`.
+
+The dev server prefers `http://127.0.0.1:24680` (not 5173 or 5713). If that port is busy, Vite picks the next free one—check the terminal line `Local:`. Preview prefers `http://127.0.0.1:27272/` the same way. Edit `vite.config.ts` to change defaults.
 
 ## Local ONNX assets
 
