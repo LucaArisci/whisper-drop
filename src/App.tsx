@@ -13,7 +13,11 @@ import { downloadTextFile } from "./lib/download-file";
 import { isSupportedAudioFile } from "./lib/file";
 import { formatBytes, formatSeconds, humanProgress } from "./lib/format";
 import { useInstallPrompt } from "./lib/install";
-import { getModelRuntimeWarning, getReportedDeviceMemory } from "./lib/runtime-support";
+import {
+  getAutoLanguageWarning,
+  getModelRuntimeWarning,
+  getReportedDeviceMemory
+} from "./lib/runtime-support";
 import { getMeta, persistLastSelections } from "./lib/storage";
 import { TranscriptionWorkerClient, type WorkerListeners } from "./lib/worker-client";
 import { initialAppState } from "./state";
@@ -178,11 +182,16 @@ export default function App() {
   const transcriptWordCount = state.transcript?.text.trim().split(/\s+/).filter(Boolean).length ?? 0;
   const transcriptCharacterCount = state.transcript?.text.length ?? 0;
   const selectedModelRuntimeWarning = getModelRuntimeWarning(selectedModel, reportedDeviceMemory);
+  const autoLanguageWarning = getAutoLanguageWarning(
+    state.language as (typeof LANGUAGE_OPTIONS)[number]["value"],
+    state.selectedDuration
+  );
   const canStart = Boolean(
     state.selectedFile &&
       activeModelState?.installed &&
       !state.busy &&
-      !selectedModelRuntimeWarning
+      !selectedModelRuntimeWarning &&
+      !autoLanguageWarning
   );
   const canInstallSelectedModel = Boolean(
     !state.busy && !activeModelState?.installed && !selectedModelRuntimeWarning
@@ -294,6 +303,14 @@ export default function App() {
   };
 
   const startTranscription = async () => {
+    if (autoLanguageWarning) {
+      setState((current) => ({
+        ...current,
+        error: autoLanguageWarning
+      }));
+      return;
+    }
+
     if (selectedModelRuntimeWarning) {
       setState((current) => ({
         ...current,
@@ -560,7 +577,8 @@ export default function App() {
                   onChange={(event) =>
                     setState((current) => ({
                       ...current,
-                      language: event.target.value
+                      language: event.target.value,
+                      error: null
                     }))
                   }
                 >
@@ -570,6 +588,7 @@ export default function App() {
                     </option>
                   ))}
                 </select>
+                {autoLanguageWarning ? <p className="inline-error">{autoLanguageWarning}</p> : null}
               </label>
 
               <label className="control-field" htmlFor="model">

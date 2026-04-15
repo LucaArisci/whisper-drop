@@ -9,7 +9,7 @@ export const SUPPORTED_AUDIO_TYPES = new Set([
 ]);
 
 export const LANGUAGE_OPTIONS: Array<{ label: string; value: LanguageCode }> = [
-  { label: "Auto detect", value: "auto" },
+  { label: "Auto detect (short clips)", value: "auto" },
   { label: "Italian", value: "it" },
   { label: "English", value: "en" },
   { label: "French", value: "fr" },
@@ -59,3 +59,4 @@ export const DEFAULT_MODEL_ID = MODELS[0].id;
 export const DEFAULT_LANGUAGE = LANGUAGE_OPTIONS[0].value;
 export const DEFAULT_CHUNK_SECONDS = 30;
 export const DEFAULT_OVERLAP_SECONDS = 2;
+export const AUTO_LANGUAGE_MAX_RELIABLE_SECONDS = 120;

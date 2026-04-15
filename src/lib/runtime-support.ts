@@ -1,4 +1,5 @@
-import type { ModelDefinition } from "../types";
+import { AUTO_LANGUAGE_MAX_RELIABLE_SECONDS } from "../constants";
+import type { LanguageCode, ModelDefinition } from "../types";
 
 type NavigatorWithDeviceMemory = Navigator & {
   deviceMemory?: number;
@@ -26,6 +27,21 @@ export function getModelRuntimeWarning(
   }
 
   return `${model.label} usually needs a browser reporting at least ${model.minimumDeviceMemoryGb} GB of device memory. This browser reports ${deviceMemory} GB, so transcription may fail.`;
+}
+
+export function getAutoLanguageWarning(
+  language: LanguageCode,
+  durationSeconds: number | null
+): string | null {
+  if (language !== "auto" || durationSeconds === null) {
+    return null;
+  }
+
+  if (durationSeconds <= AUTO_LANGUAGE_MAX_RELIABLE_SECONDS) {
+    return null;
+  }
+
+  return "Auto detect can truncate longer recordings in browser Whisper. Choose the spoken language manually before starting transcription.";
 }
 
 export function normalizeOrtRuntimeError(error: unknown, model: ModelDefinition): Error {
