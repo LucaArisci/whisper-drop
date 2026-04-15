@@ -13,6 +13,7 @@ import { downloadTextFile } from "./lib/download-file";
 import { isSupportedAudioFile } from "./lib/file";
 import { formatBytes, formatSeconds, humanProgress } from "./lib/format";
 import { useInstallPrompt } from "./lib/install";
+import { getModelRuntimeWarning, getReportedDeviceMemory } from "./lib/runtime-support";
 import { getMeta, persistLastSelections } from "./lib/storage";
 import { TranscriptionWorkerClient, type WorkerListeners } from "./lib/worker-client";
 import { initialAppState } from "./state";
@@ -59,13 +60,28 @@ export default function App() {
       }));
     },
     onModelState: (modelState) => {
-      setState((current) => ({
-        ...current,
-        models: {
-          ...current.models,
-          [modelState.modelId]: modelState
-        }
-      }));
+      setState((current) => {
+        const completedModelDownload =
+          current.progress?.stage === "download" && !modelState.pending && !modelState.error;
+
+        return {
+          ...current,
+          busy: completedModelDownload ? false : current.busy,
+          progress: completedModelDownload
+            ? {
+                stage: "finalize",
+                percent: 100,
+                message: modelState.installed
+                  ? "Model ready. You can start transcription."
+                  : "Model removed from local cache."
+              }
+            : current.progress,
+          models: {
+            ...current.models,
+            [modelState.modelId]: modelState
+          }
+        };
+      });
     },
     onProgress: (progress) => {
       setState((current) => ({
@@ -154,14 +170,23 @@ export default function App() {
     () => MODELS.find((model) => model.id === state.modelId) ?? MODELS[0],
     [state.modelId]
   );
+  const reportedDeviceMemory = useMemo(() => getReportedDeviceMemory(), []);
   const activeModelState = state.models[state.modelId];
   const installedModelCount = MODELS.filter((model) => state.models[model.id]?.installed).length;
   const selectedLanguage =
     LANGUAGE_OPTIONS.find((option) => option.value === state.language) ?? LANGUAGE_OPTIONS[0];
   const transcriptWordCount = state.transcript?.text.trim().split(/\s+/).filter(Boolean).length ?? 0;
   const transcriptCharacterCount = state.transcript?.text.length ?? 0;
-  const canStart = Boolean(state.selectedFile && activeModelState?.installed && !state.busy);
-  const canInstallSelectedModel = Boolean(!state.busy && !activeModelState?.installed);
+  const selectedModelRuntimeWarning = getModelRuntimeWarning(selectedModel, reportedDeviceMemory);
+  const canStart = Boolean(
+    state.selectedFile &&
+      activeModelState?.installed &&
+      !state.busy &&
+      !selectedModelRuntimeWarning
+  );
+  const canInstallSelectedModel = Boolean(
+    !state.busy && !activeModelState?.installed && !selectedModelRuntimeWarning
+  );
   const progressValue = state.progress?.percent ?? 0;
   const progressDetails = state.progress?.chunkCount
     ? `Chunk ${state.progress.chunkIndex} of ${state.progress.chunkCount}`
@@ -241,6 +266,17 @@ export default function App() {
   };
 
   const ensureModel = (modelId: string) => {
+    const model = MODELS.find((entry) => entry.id === modelId) ?? MODELS[0];
+    const runtimeWarning = getModelRuntimeWarning(model, reportedDeviceMemory);
+    if (runtimeWarning) {
+      setState((current) => ({
+        ...current,
+        modelId,
+        error: runtimeWarning
+      }));
+      return;
+    }
+
     setState((current) => ({
       ...current,
       modelId,
@@ -258,6 +294,14 @@ export default function App() {
   };
 
   const startTranscription = async () => {
+    if (selectedModelRuntimeWarning) {
+      setState((current) => ({
+        ...current,
+        error: selectedModelRuntimeWarning
+      }));
+      return;
+    }
+
     if (!state.selectedFile) {
       setState((current) => ({
         ...current,
@@ -554,9 +598,17 @@ export default function App() {
                 <p className="panel-label">Current pick</p>
                 <h3>{selectedModel.label}</h3>
                 <p>{selectedModel.recommendedFor}</p>
+                {selectedModelRuntimeWarning ? (
+                  <p className="inline-error">{selectedModelRuntimeWarning}</p>
+                ) : null}
               </div>
               <div className="selected-model-meta">
                 <span className="mono-pill">{formatBytes(selectedModel.sizeBytes)}</span>
+                {reportedDeviceMemory !== null ? (
+                  <span className="mono-pill mono-pill-neutral">
+                    Browser memory: {reportedDeviceMemory} GB
+                  </span>
+                ) : null}
                 <span
                   className={`mono-pill ${
                     activeModelState?.installed ? "mono-pill-green" : "mono-pill-neutral"
@@ -577,6 +629,7 @@ export default function App() {
                 const installed = Boolean(install?.installed);
                 const pending = Boolean(install?.pending);
                 const selected = state.modelId === model.id;
+                const runtimeWarning = getModelRuntimeWarning(model, reportedDeviceMemory);
 
                 return (
                   <article
@@ -592,6 +645,7 @@ export default function App() {
                         </span>
                       </div>
                       <p>{model.recommendedFor}</p>
+                      {runtimeWarning ? <p className="inline-error">{runtimeWarning}</p> : null}
                       {install?.error ? <p className="inline-error">{install.error}</p> : null}
                     </div>
 
@@ -623,7 +677,7 @@ export default function App() {
                           className="ghost-button"
                           type="button"
                           onClick={() => ensureModel(model.id)}
-                          disabled={state.busy || pending}
+                          disabled={state.busy || pending || Boolean(runtimeWarning)}
                         >
                           {pending ? "Downloading..." : "Download"}
                         </button>

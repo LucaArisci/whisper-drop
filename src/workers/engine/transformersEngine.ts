@@ -1,5 +1,6 @@
 import { env, pipeline } from "@xenova/transformers";
 import { buildAudioChunks } from "../../lib/chunking";
+import { normalizeOrtRuntimeError } from "../../lib/runtime-support";
 import { resolveTranscriptText } from "../../lib/text";
 import { getModelDefinition } from "../../lib/storage";
 import type { DecodedAudioPayload, LanguageCode, TranscriptionProgress } from "../../types";
@@ -313,29 +314,36 @@ export async function transcribeWithTransformers(
     throw new Error("Transcription cancelled.");
   }
 
-  const result = await transcriber(audio.samples, {
-    top_k: 0,
-    do_sample: false,
-    chunk_length_s: chunkSeconds,
-    stride_length_s: overlapSeconds,
-    ...(options.language === "auto"
-      ? {}
-      : {
-          language: resolveLanguage(options.language),
-          task: "transcribe"
-        }),
-    force_full_sequences: false,
-    chunk_callback: (_chunk: ChunkInfo) => {
-      completedChunks = Math.min(estimatedChunkCount, completedChunks + 1);
-      onProgress({
-        stage: "transcribe",
-        percent: (completedChunks / estimatedChunkCount) * 100,
-        message: `Transcribing chunk ${completedChunks} of ${estimatedChunkCount}...`,
-        chunkIndex: completedChunks,
-        chunkCount: estimatedChunkCount
-      });
-    }
-  });
+  const model = getModelDefinition(options.modelId);
+  let result: TranscriberResult;
+
+  try {
+    result = await transcriber(audio.samples, {
+      top_k: 0,
+      do_sample: false,
+      chunk_length_s: chunkSeconds,
+      stride_length_s: overlapSeconds,
+      ...(options.language === "auto"
+        ? {}
+        : {
+            language: resolveLanguage(options.language),
+            task: "transcribe"
+          }),
+      force_full_sequences: false,
+      chunk_callback: (_chunk: ChunkInfo) => {
+        completedChunks = Math.min(estimatedChunkCount, completedChunks + 1);
+        onProgress({
+          stage: "transcribe",
+          percent: (completedChunks / estimatedChunkCount) * 100,
+          message: `Transcribing chunk ${completedChunks} of ${estimatedChunkCount}...`,
+          chunkIndex: completedChunks,
+          chunkCount: estimatedChunkCount
+        });
+      }
+    });
+  } catch (error) {
+    throw normalizeOrtRuntimeError(error, model);
+  }
 
   if (shouldCancel()) {
     throw new Error("Transcription cancelled.");

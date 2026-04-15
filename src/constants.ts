@@ -49,7 +49,9 @@ export const MODELS: ModelDefinition[] = [
     engineModelId: "Xenova/whisper-medium",
     quantized: true,
     sizeBytes: 776129634,
-    recommendedFor: "Highest accuracy in this app. Best reserved for strong desktop hardware and long waits."
+    recommendedFor:
+      "Highest accuracy in this app. Experimental in browsers and best reserved for strong desktop hardware.",
+    minimumDeviceMemoryGb: 16
   }
 ];
 

@@ -7,6 +7,7 @@ export interface ModelDefinition {
   quantized?: boolean;
   sizeBytes: number;
   recommendedFor: string;
+  minimumDeviceMemoryGb?: number;
 }
 
 export interface TranscriptionRequest {
