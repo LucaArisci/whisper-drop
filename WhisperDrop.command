@@ -86,7 +86,7 @@ fi
 if [ "$NEEDS_SETUP" -eq 1 ]; then
   echo "First launch detected. Running setup..."
   echo ""
-  if ! bash "$PWD/setup.sh"; then
+  if ! bash "$PWD/scripts/setup.sh"; then
     echo ""
     echo "Setup failed. Please review the messages above."
     pause_on_error

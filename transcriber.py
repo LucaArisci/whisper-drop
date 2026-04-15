@@ -9,7 +9,6 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from tkinter.scrolledtext import ScrolledText
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -71,19 +70,27 @@ RED_SOFT = "#2a0d0d"
 UI_FONT = ".AppleSystemUIFont" if os.name == "posix" and "darwin" in sys.platform else "Helvetica"
 MONO_FONT = "SF Mono" if os.name == "posix" and "darwin" in sys.platform else "Menlo"
 
+SCROLLBAR_WIDTH = 10
+THUMB_MIN_HEIGHT = 30
+
 
 class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("WhisperDrop")
-        self.geometry("820x720")
-        self.minsize(720, 620)
+        self.geometry("1200x780")
+        self.minsize(900, 620)
         self.configure(bg=BG)
 
         self.app_dir = Path(__file__).resolve().parent
         self.model_dir = self.app_dir / ".models" / "whisper.cpp"
         self.file_path = None
         self.output_dir = None
+
+        self._scroll_top = 0.0
+        self._scroll_bottom = 1.0
+        self._scroll_drag_start_y = None
+        self._scroll_drag_start_top = None
 
         default_model = "Turbo Q5"
         self.file_var = tk.StringVar(value="No file selected")
@@ -130,16 +137,22 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         root = tk.Frame(self, bg=BG, padx=28, pady=24)
         root.grid(sticky="nsew")
-        root.grid_columnconfigure(0, weight=1)
-        root.grid_rowconfigure(4, weight=1)
 
+        root.grid_columnconfigure(0, weight=1, uniform="col")
+        root.grid_columnconfigure(1, weight=1, uniform="col")
+
+        root.grid_rowconfigure(1, weight=0)
+        root.grid_rowconfigure(2, weight=0)
+        root.grid_rowconfigure(3, weight=1)
+
+        # ── Header ───────────────────────────────────────────────────────────
         header = tk.Frame(root, bg=BG)
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 18))
+        header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 18))
         header.grid_columnconfigure(0, weight=1)
 
         tk.Label(
             header,
-            text="WhisperDrop",
+            text="WhisperDrop  🎙️",
             font=(UI_FONT, 24, "bold"),
             bg=BG,
             fg=TEXT,
@@ -153,14 +166,15 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         ).grid(row=1, column=0, sticky="w", pady=(6, 0))
         tk.Frame(header, bg=GREEN, height=3, width=96).grid(row=2, column=0, sticky="w", pady=(14, 0))
 
+        # ── File card ─────────────────────────────────────────────────────────
         file_card = tk.Frame(root, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
-        file_card.grid(row=1, column=0, sticky="ew")
+        file_card.grid(row=1, column=0, sticky="ew", padx=(0, 10))
         file_card.grid_columnconfigure(0, weight=1)
 
         tk.Label(
             file_card,
-            text="File  📁",
-            font=(UI_FONT, 12, "bold"),
+            text="File",
+            font=(UI_FONT, 15, "bold"),
             bg=CARD,
             fg=TEXT,
         ).grid(row=0, column=0, sticky="w", padx=18, pady=(16, 6))
@@ -184,8 +198,8 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         self.drop_title = tk.Label(
             self.drop_zone,
-            text="Drop file here  🎧",
-            font=(UI_FONT, 16, "bold"),
+            text="Drop file here ➕",
+            font=(UI_FONT, 20, "bold"),
             bg=BG,
             fg=TEXT,
         )
@@ -206,24 +220,33 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         browse_row = tk.Frame(file_card, bg=CARD)
         browse_row.grid(row=2, column=0, sticky="ew", padx=18, pady=(14, 12))
-        browse_row.grid_columnconfigure(1, weight=1)
+        browse_row.grid_columnconfigure(0, weight=1)
 
-        self.browse_btn = tk.Button(
+        self.browse_btn_frame = tk.Frame(
             browse_row,
-            text="Browse File  📂",
-            command=self._browse_file,
-            font=(UI_FONT, 11, "bold"),
-            bg=WHITE,
-            fg=BG,
-            activebackground=WHITE_SOFT,
-            activeforeground=BG,
-            bd=0,
-            padx=18,
-            pady=10,
+            bg=GREEN_SOFT,
+            highlightbackground=GREEN,
+            highlightthickness=1,
             cursor="hand2",
-            disabledforeground="#555555",
         )
-        self.browse_btn.grid(row=0, column=0, sticky="w")
+        self.browse_btn_frame.grid(row=0, column=0)
+
+        self.browse_btn = tk.Label(
+            self.browse_btn_frame,
+            text="Browse File  📂",
+            font=(UI_FONT, 13, "bold"),
+            bg=GREEN_SOFT,
+            fg=GREEN,
+            padx=18,
+            pady=14,
+            cursor="hand2",
+        )
+        self.browse_btn.pack()
+
+        self.browse_btn.bind("<Button-1>", self._browse_file)
+        self.browse_btn_frame.bind("<Button-1>", self._browse_file)
+        self.browse_btn.bind("<Enter>", lambda e: (self.browse_btn_frame.config(bg="#0f2e1a"), self.browse_btn.config(bg="#0f2e1a")))
+        self.browse_btn.bind("<Leave>", lambda e: (self.browse_btn_frame.config(bg=GREEN_SOFT), self.browse_btn.config(bg=GREEN_SOFT)))
 
         file_info = tk.Frame(file_card, bg=CARD)
         file_info.grid(row=3, column=0, sticky="ew", padx=18, pady=(0, 18))
@@ -249,17 +272,19 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         )
         self.file_help_label.grid(row=1, column=0, sticky="ew", pady=(4, 0))
 
+        # ── Options ───────────────────────────────────────────────────────────
         options = tk.Frame(root, bg=BG)
-        options.grid(row=2, column=0, sticky="ew", pady=(18, 18))
+        options.grid(row=2, column=0, sticky="ew", padx=(0, 10), pady=(18, 18))
         options.grid_columnconfigure(0, weight=1)
         options.grid_columnconfigure(1, weight=1)
+        options.grid_rowconfigure(0, weight=1)
 
         lang_card = tk.Frame(options, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
-        lang_card.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        lang_card.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         tk.Label(
             lang_card,
             text="Language",
-            font=(UI_FONT, 11, "bold"),
+            font=(UI_FONT, 15, "bold"),
             bg=CARD,
             fg=TEXT,
         ).pack(anchor="w", padx=16, pady=(14, 6))
@@ -277,8 +302,8 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         model_card.grid(row=0, column=1, sticky="ew", padx=(8, 0))
         tk.Label(
             model_card,
-            text="Model  ⚙️",
-            font=(UI_FONT, 11, "bold"),
+            text="Model",
+            font=(UI_FONT, 15, "bold"),
             bg=CARD,
             fg=TEXT,
         ).pack(anchor="w", padx=16, pady=(14, 6))
@@ -303,26 +328,37 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             anchor="w",
         ).pack(fill="x", padx=16, pady=(0, 14))
 
+        # ── Action card ───────────────────────────────────────────────────────
         action_card = tk.Frame(root, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
-        action_card.grid(row=3, column=0, sticky="ew", pady=(0, 18))
+        action_card.grid(row=3, column=0, sticky="nsew", padx=(0, 10))
         action_card.grid_columnconfigure(0, weight=1)
 
-        self.run_btn = tk.Button(
+        self.run_btn_frame = tk.Frame(
             action_card,
+            bg=GREEN_SOFT,
+            highlightbackground=GREEN,
+            highlightthickness=1,
+            cursor="hand2",
+        )
+        self.run_btn_frame.grid(row=0, column=0, sticky="ew", padx=18, pady=(18, 10))
+        self.run_btn_frame.grid_columnconfigure(0, weight=1)
+
+        self.run_btn = tk.Label(
+            self.run_btn_frame,
             text="Start Transcription  ▶️",
-            command=self._run_transcription,
             font=(UI_FONT, 13, "bold"),
-            bg=GREEN,
-            fg=BG,
-            activebackground=GREEN_DARK,
-            activeforeground=BG,
-            bd=0,
+            bg=GREEN_SOFT,
+            fg=GREEN,
             padx=18,
             pady=14,
             cursor="hand2",
-            disabledforeground="#555555",
         )
-        self.run_btn.grid(row=0, column=0, sticky="ew", padx=18, pady=(18, 10))
+        self.run_btn.pack(fill="x")
+
+        self.run_btn.bind("<Button-1>", lambda e: self._run_transcription())
+        self.run_btn_frame.bind("<Button-1>", lambda e: self._run_transcription())
+        self.run_btn.bind("<Enter>", lambda e: (self.run_btn_frame.config(bg="#0f2e1a"), self.run_btn.config(bg="#0f2e1a")))
+        self.run_btn.bind("<Leave>", lambda e: (self.run_btn_frame.config(bg=GREEN_SOFT), self.run_btn.config(bg=GREEN_SOFT)))
 
         self.progress = ttk.Progressbar(action_card, mode="indeterminate", style="App.Horizontal.TProgressbar")
 
@@ -339,22 +375,27 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         )
         self.status_label.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 18))
 
+        # ── Log card (right column, spans rows 1-3) ───────────────────────────
         log_card = tk.Frame(root, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
-        log_card.grid(row=4, column=0, sticky="nsew")
+        log_card.grid(row=1, column=1, rowspan=3, sticky="nsew", padx=(10, 0))
         log_card.grid_columnconfigure(0, weight=1)
         log_card.grid_rowconfigure(1, weight=1)
 
         tk.Label(
             log_card,
-            text="Log  📝",
-            font=(UI_FONT, 12, "bold"),
+            text="Log",
+            font=(UI_FONT, 15, "bold"),
             bg=CARD,
             fg=TEXT,
         ).grid(row=0, column=0, sticky="w", padx=18, pady=(16, 8))
 
-        self.log = ScrolledText(
-            log_card,
-            height=10,
+        log_frame = tk.Frame(log_card, bg=BG)
+        log_frame.grid(row=1, column=0, sticky="nsew", padx=18, pady=(0, 18))
+        log_frame.grid_columnconfigure(0, weight=1)
+        log_frame.grid_rowconfigure(0, weight=1)
+
+        self.log = tk.Text(
+            log_frame,
             wrap="word",
             bg=BG,
             fg=TEXT,
@@ -363,13 +404,66 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             font=(MONO_FONT, 11),
             padx=12,
             pady=12,
+            yscrollcommand=self._update_scrollbar,
         )
-        self.log.grid(row=1, column=0, sticky="nsew", padx=18, pady=(0, 18))
+        self.log.grid(row=0, column=0, sticky="nsew")
         self.log.config(state="disabled")
+
+        # Custom canvas scrollbar
+        self._scroll_canvas = tk.Canvas(
+            log_frame,
+            width=SCROLLBAR_WIDTH + 1,
+            bg=BG,
+            highlightthickness=0,
+            bd=0,
+        )
+        self._scroll_canvas.grid(row=0, column=1, sticky="ns", padx=(4, 0))
+
+        self._scroll_thumb = self._scroll_canvas.create_rectangle(
+            1, 0, SCROLLBAR_WIDTH - 1, THUMB_MIN_HEIGHT,
+            fill=GREEN_SOFT,
+            outline=GREEN,
+            width=1,
+        )
+
+        self._scroll_canvas.bind("<ButtonPress-1>", self._scroll_click)
+        self._scroll_canvas.bind("<B1-Motion>", self._scroll_drag)
+        self._scroll_canvas.bind("<Enter>", lambda e: self._scroll_canvas.itemconfig(self._scroll_thumb, fill="#0f2e1a"))
+        self._scroll_canvas.bind("<Leave>", lambda e: self._scroll_canvas.itemconfig(self._scroll_thumb, fill=GREEN_SOFT))
 
         self._set_drop_zone_hover(False)
         self._set_status("Ready", "neutral")
         self._log("Ready. whisper.cpp backend is active.")
+
+    def _update_scrollbar(self, top, bottom):
+        self._scroll_top = float(top)
+        self._scroll_bottom = float(bottom)
+        self._scroll_canvas.update_idletasks()
+        h = self._scroll_canvas.winfo_height()
+        if h <= 0:
+            return
+        y0 = int(self._scroll_top * h)
+        y1 = int(self._scroll_bottom * h)
+        thumb_h = max(y1 - y0, THUMB_MIN_HEIGHT)
+        # Clamp so thumb doesn't overflow
+        if y0 + thumb_h > h:
+            y0 = h - thumb_h
+        self._scroll_canvas.coords(self._scroll_thumb, 0, y0, SCROLLBAR_WIDTH, y0 + thumb_h - 1)
+
+    def _scroll_click(self, event):
+        h = self._scroll_canvas.winfo_height()
+        if h <= 0:
+            return
+        self._scroll_drag_start_y = event.y
+        self._scroll_drag_start_top = self._scroll_top
+        self.log.yview_moveto(event.y / h)
+
+    def _scroll_drag(self, event):
+        h = self._scroll_canvas.winfo_height()
+        if h <= 0 or self._scroll_drag_start_y is None:
+            return
+        delta = (event.y - self._scroll_drag_start_y) / h
+        self.log.yview_moveto(self._scroll_drag_start_top + delta)
 
     def _bind_shortcuts(self):
         self.bind("<Return>", self._on_enter_key)
@@ -572,14 +666,22 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
     def _set_busy(self, busy):
         if busy:
-            self.run_btn.config(state="disabled", text="Transcribing...  ⏳", bg=GREEN_DARK, fg=BG)
+            self.run_btn.config(text="Transcribing...  ⏳", fg=MUTED)
+            self.run_btn_frame.config(cursor="")
+            self.run_btn.config(cursor="")
+            self.run_btn.unbind("<Button-1>")
+            self.run_btn_frame.unbind("<Button-1>")
             self.progress.grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 10))
             self.progress.start(10)
             self._set_status("Transcription in progress...", "neutral")
         else:
+            self.run_btn.config(text="Start Transcription  ▶️", fg=GREEN)
+            self.run_btn_frame.config(cursor="hand2")
+            self.run_btn.config(cursor="hand2")
+            self.run_btn.bind("<Button-1>", lambda e: self._run_transcription())
+            self.run_btn_frame.bind("<Button-1>", lambda e: self._run_transcription())
             self.progress.stop()
             self.progress.grid_forget()
-            self.run_btn.config(state="normal", text="Start Transcription  ▶️", bg=GREEN, fg=BG)
 
     def _run_transcription(self):
         if not self.file_path:
