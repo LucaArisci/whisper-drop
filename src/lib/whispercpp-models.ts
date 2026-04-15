@@ -19,19 +19,19 @@ export const WHISPER_CPP_MODELS: ModelDefinition[] = [
     quantized: true
   },
   {
-    id: "wc-turbo-q5",
-    label: "Large v3 Turbo (Q5_0, experimental)",
-    engineModelId: "ggml-large-v3-turbo-q5_0.bin",
-    sizeBytes: 574 * 1024 * 1024,
-    recommendedFor:
-      "OpenAI Whisper large-v3-turbo in GGML Q5_0 (~574 MB). Strong quality but heavy: desktop Chrome/Edge with plenty of RAM only.",
+    id: "wc-small-q5",
+    label: "Small (Q5_1)",
+    engineModelId: "ggml-small-q5_1.bin",
+    sizeBytes: 190_085_487,
+    recommendedFor: "Stronger than Base with a larger download. Best on desktop Chrome/Edge.",
     quantized: true,
-    minimumDeviceMemoryGb: 12
+    minimumDeviceMemoryGb: 8
   }
 ];
 
-const DOWNLOAD_BASE =
-  "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/";
+export const DEFAULT_WHISPER_CPP_MODEL_ID = WHISPER_CPP_MODELS[0]!.id;
+
+const DOWNLOAD_BASE = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/";
 
 export function whisperCppModelDownloadUrl(model: ModelDefinition): string {
   return `${DOWNLOAD_BASE}${model.engineModelId}`;

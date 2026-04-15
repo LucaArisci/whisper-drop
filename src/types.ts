@@ -1,5 +1,3 @@
-export type TranscriptionBackendId = "transformers" | "whispercpp";
-
 export interface WhisperCppRuntimeCapabilities {
   crossOriginIsolated: boolean;
   simd: boolean;
@@ -21,11 +19,7 @@ export interface ModelDefinition {
 export interface TranscriptionRequest {
   language: LanguageCode;
   modelId: string;
-  chunkSeconds: number;
-  overlapSeconds: number;
-  /** whisper.cpp only — thread count passed to WASM binding */
   threads?: number;
-  /** whisper.cpp only — translate to English */
   translate?: boolean;
 }
 
@@ -93,4 +87,12 @@ export type WorkerEventMessage =
 export interface InstallPromptState {
   canInstall: boolean;
   prompt: (() => Promise<void>) | null;
+}
+
+export interface WorkerListeners {
+  onReady?: (available: boolean, capabilities?: WhisperCppRuntimeCapabilities) => void;
+  onModelState?: (state: ModelInstallState) => void;
+  onProgress?: (progress: TranscriptionProgress) => void;
+  onResult?: (result: TranscriptResult) => void;
+  onError?: (message: string) => void;
 }

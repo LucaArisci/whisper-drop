@@ -43,21 +43,3 @@ export function getAutoLanguageWarning(
 
   return "Auto detect can truncate longer recordings in browser Whisper. Choose the spoken language manually before starting transcription.";
 }
-
-export function normalizeOrtRuntimeError(error: unknown, model: ModelDefinition): Error {
-  const message = error instanceof Error ? error.message : String(error);
-
-  if (/failed to call OrtRun\(\)\. error code = 6/i.test(message)) {
-    if (model.id === "medium") {
-      return new Error(
-        `${model.label} ran out of browser memory during transcription. This model is often too large for ONNX Runtime Web. Try Small, Base, or Tiny instead.`
-      );
-    }
-
-    return new Error(
-      `${model.label} hit a browser runtime memory limit during transcription. Try a smaller model or a shorter audio clip.`
-    );
-  }
-
-  return error instanceof Error ? error : new Error(message);
-}

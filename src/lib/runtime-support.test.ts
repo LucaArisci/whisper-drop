@@ -1,29 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { MODELS } from "../constants";
-import {
-  getAutoLanguageWarning,
-  getModelRuntimeWarning,
-  normalizeOrtRuntimeError
-} from "./runtime-support";
+import { WHISPER_CPP_MODELS } from "./whispercpp-models";
+import { getAutoLanguageWarning, getModelRuntimeWarning } from "./runtime-support";
+
+const smallModel = WHISPER_CPP_MODELS.find((m) => m.id === "wc-small-q5")!;
 
 describe("getModelRuntimeWarning", () => {
   it("warns when the browser reports too little memory for the model", () => {
-    expect(getModelRuntimeWarning(MODELS[3], 8)).toContain("browser reports 8 GB");
+    expect(getModelRuntimeWarning(smallModel, 4)).toContain("browser reports 4 GB");
   });
 
   it("does not warn when the browser reports enough memory", () => {
-    expect(getModelRuntimeWarning(MODELS[3], 16)).toBeNull();
-  });
-});
-
-describe("normalizeOrtRuntimeError", () => {
-  it("turns OrtRun code 6 into a model-specific memory message", () => {
-    expect(
-      normalizeOrtRuntimeError(
-        new Error("failed to call OrtRun(). error code = 6."),
-        MODELS[3]
-      ).message
-    ).toContain("ran out of browser memory");
+    expect(getModelRuntimeWarning(smallModel, 8)).toBeNull();
   });
 });
 

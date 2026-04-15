@@ -1,20 +1,11 @@
-import { MODELS } from "../constants";
-import type {
-  ModelDefinition,
-  ModelInstallState,
-  TranscriptionBackendId
-} from "../types";
-
 const DB_NAME = "whisper-drop";
 const META_STORE_NAME = "meta";
 const META_KEY = "whisper-drop-meta";
-const TRANSFORMERS_CACHE_KEY = "transformers-cache";
 
 type MetaRecord = {
   lastModelId?: string;
   lastLanguage?: string;
   installedModels?: Record<string, number>;
-  lastTranscriptionBackend?: TranscriptionBackendId;
 };
 
 async function openIndexedDb(): Promise<IDBDatabase> {
@@ -54,85 +45,11 @@ export async function getMeta(): Promise<MetaRecord> {
   return result;
 }
 
-export async function persistLastSelections(
-  modelId: string,
-  language: string
-): Promise<void> {
+export async function persistLastSelections(modelId: string, language: string): Promise<void> {
   const meta = await getMeta();
   await setMeta({
     ...meta,
     lastModelId: modelId,
     lastLanguage: language
   });
-}
-
-export async function persistTranscriptionBackend(
-  backend: TranscriptionBackendId
-): Promise<void> {
-  const meta = await getMeta();
-  await setMeta({
-    ...meta,
-    lastTranscriptionBackend: backend
-  });
-}
-
-export async function markModelInstalled(modelId: string): Promise<void> {
-  const meta = await getMeta();
-  await setMeta({
-    ...meta,
-    installedModels: {
-      ...(meta.installedModels ?? {}),
-      [modelId]: Date.now()
-    }
-  });
-}
-
-export async function markModelRemoved(modelId: string): Promise<void> {
-  const meta = await getMeta();
-  const installedModels = {
-    ...(meta.installedModels ?? {})
-  };
-  delete installedModels[modelId];
-  await setMeta({
-    ...meta,
-    installedModels
-  });
-}
-
-export async function listInstalledModels(): Promise<ModelInstallState[]> {
-  const meta = await getMeta();
-  const installedModels = meta.installedModels ?? {};
-
-  return MODELS.map((model) => ({
-    modelId: model.id,
-    installed: Boolean(installedModels[model.id]),
-    pending: false,
-    sizeBytes: model.sizeBytes,
-    updatedAt: installedModels[model.id]
-  }));
-}
-
-export function getModelDefinition(modelId: string): ModelDefinition {
-  const model = MODELS.find((entry) => entry.id === modelId);
-  if (!model) {
-    throw new Error(`Unknown model: ${modelId}`);
-  }
-  return model;
-}
-
-export async function clearModelCache(modelId: string): Promise<void> {
-  if (typeof caches === "undefined") {
-    return;
-  }
-
-  const model = getModelDefinition(modelId);
-  const cache = await caches.open(TRANSFORMERS_CACHE_KEY);
-  const entries = await cache.keys();
-  const repoMarker = `/${model.engineModelId}/resolve/`;
-
-  await Promise.all(
-    entries
-      .filter((request) => request.url.includes(repoMarker))
-      .map((request) => cache.delete(request))
-  );
 }

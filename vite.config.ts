@@ -4,20 +4,20 @@ import { VitePWA } from "vite-plugin-pwa";
 
 export default defineConfig({
   server: {
-    host: "127.0.0.1",
-    // Not 5173/5713: prefer this port; if busy Vite picks the next free one (strictPort: false).
+    // Listen on all local addresses so both http://127.0.0.1 and http://localhost work
+    // (some tools open one or the other; 127.0.0.1-only can leave "localhost" with a blank page).
+    host: true,
     port: 24680,
-    strictPort: false,
+    strictPort: true,
     headers: {
       "Cross-Origin-Opener-Policy": "same-origin",
-      // credentialless keeps cross-origin fetch usable without CORP on CDNs while enabling isolation features.
       "Cross-Origin-Embedder-Policy": "credentialless"
     }
   },
   preview: {
-    host: "127.0.0.1",
+    host: true,
     port: 27272,
-    strictPort: false,
+    strictPort: true,
     headers: {
       "Cross-Origin-Opener-Policy": "same-origin",
       "Cross-Origin-Embedder-Policy": "credentialless"
@@ -56,16 +56,6 @@ export default defineConfig({
             }
           },
           {
-            urlPattern: ({ url }) => url.pathname.startsWith("/ort/"),
-            handler: "CacheFirst",
-            options: {
-              cacheName: "ort-cache",
-              expiration: {
-                maxEntries: 4
-              }
-            }
-          },
-          {
             urlPattern: ({ url }) => url.pathname.startsWith("/whispercpp/"),
             handler: "CacheFirst",
             options: {
@@ -81,9 +71,6 @@ export default defineConfig({
   ],
   worker: {
     format: "es"
-  },
-  optimizeDeps: {
-    include: ["@xenova/transformers"]
   },
   build: {
     target: "es2022"

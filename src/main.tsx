@@ -44,8 +44,54 @@ if (import.meta.env.PROD) {
   void clearDevServiceWorkers();
 }
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
+const rootEl = document.getElementById("root");
+if (!rootEl) {
+  throw new Error("Missing #root element");
+}
+
+class RootErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: Error | null }
+> {
+  state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="boot-shell" style={{ textAlign: "left", maxWidth: 640, margin: "0 auto" }}>
+          <p>
+            <strong>WhisperDrop crashed while starting.</strong>
+          </p>
+          <pre
+            style={{
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-word",
+              fontSize: 13,
+              color: "rgba(255,255,255,0.85)"
+            }}
+          >
+            {this.state.error.message}
+          </pre>
+          <p style={{ fontSize: 14, color: "rgba(255,255,255,0.72)" }}>
+            Open the browser developer console for the full stack trace, then reload after fixing the
+            error.
+          </p>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
+ReactDOM.createRoot(rootEl).render(
   <React.StrictMode>
-    <App />
+    <RootErrorBoundary>
+      <App />
+    </RootErrorBoundary>
   </React.StrictMode>
 );

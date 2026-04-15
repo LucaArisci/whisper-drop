@@ -1,51 +1,72 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, KeyboardEvent } from "react";
-import {
-  DEFAULT_CHUNK_SECONDS,
-  DEFAULT_LANGUAGE,
-  DEFAULT_MODEL_ID,
-  DEFAULT_OVERLAP_SECONDS,
-  LANGUAGE_OPTIONS,
-  MODELS
-} from "./constants";
+import { DEFAULT_LANGUAGE, LANGUAGE_OPTIONS } from "./constants";
 import { decodeAndResampleAudio } from "./lib/audio";
 import { downloadTextFile } from "./lib/download-file";
 import { isSupportedAudioFile } from "./lib/file";
 import { formatBytes, formatSeconds, humanProgress } from "./lib/format";
 import { useInstallPrompt } from "./lib/install";
+import { getWhisperCppBackendWarning } from "./lib/runtime-capabilities";
 import {
   getAutoLanguageWarning,
   getModelRuntimeWarning,
   getReportedDeviceMemory
 } from "./lib/runtime-support";
-import { getWhisperCppBackendWarning } from "./lib/runtime-capabilities";
+import { getMeta, persistLastSelections } from "./lib/storage";
 import {
-  getMeta,
-  persistLastSelections,
-  persistTranscriptionBackend
-} from "./lib/storage";
-import { DEFAULT_TRANSCRIPTION_BACKEND, TRANSCRIPTION_BACKENDS } from "./lib/transcription-backend";
-import {
+  DEFAULT_WHISPER_CPP_MODEL_ID,
   getWhisperCppModelDefinition,
   whisperCppModelDownloadUrl,
   WHISPER_CPP_MODELS
 } from "./lib/whispercpp-models";
+import { getRecommendedWhisperCppThreads } from "./lib/whispercpp-threads";
 import { WhisperCppWorkerClient } from "./lib/whispercpp-worker-client";
-import { TranscriptionWorkerClient, type WorkerListeners } from "./lib/worker-client";
 import { initialAppState } from "./state";
-import type { TranscriptionBackendId, TranscriptResult } from "./types";
+import type { TranscriptResult, WorkerListeners } from "./types";
+
+const MODEL_CATALOG = WHISPER_CPP_MODELS;
+
+const MOBILE_BREAKPOINT = "(max-width: 767px)";
+
+type MobileSection = "upload" | "model" | "run" | "output";
+
+const MOBILE_SECTION_ORDER: MobileSection[] = ["upload", "model", "run", "output"];
+
+const MOBILE_SECTION_LABELS: Record<MobileSection, string> = {
+  upload: "Audio",
+  model: "Modello",
+  run: "Esecuzione",
+  output: "Trascrizione"
+};
+
+const MOBILE_FLOW_HINTS: Record<MobileSection, string> = {
+  upload:
+    "Carica un file, poi passa a Modello per scegliere la lingua e installare il modello (se serve).",
+  model:
+    "Qui installi o cambi modello. Quando è pronto, vai a Esecuzione per avviare la trascrizione.",
+  run: "Avvia la trascrizione qui. A fine lavoro apri Trascrizione per leggere ed esportare il testo.",
+  output: "Qui compare il testo quando la trascrizione è finita. Puoi tornare indietro con il menu Vista."
+};
+
+function useNarrowLayout(): boolean {
+  const [narrow, setNarrow] = useState(() =>
+    typeof window !== "undefined" ? window.matchMedia(MOBILE_BREAKPOINT).matches : false
+  );
+
+  useEffect(() => {
+    const mq = window.matchMedia(MOBILE_BREAKPOINT);
+    const apply = () => setNarrow(mq.matches);
+    apply();
+    mq.addEventListener("change", apply);
+    return () => mq.removeEventListener("change", apply);
+  }, []);
+
+  return narrow;
+}
 
 function transcriptFileName(source: File | null): string {
   const base = source?.name.replace(/\.[^/.]+$/, "") ?? "transcript";
   return `${base}.txt`;
-}
-
-function modelsForBackend(backend: TranscriptionBackendId) {
-  return backend === "whispercpp" ? WHISPER_CPP_MODELS : MODELS;
-}
-
-function defaultModelIdForBackend(backend: TranscriptionBackendId): string {
-  return modelsForBackend(backend)[0]?.id ?? DEFAULT_MODEL_ID;
 }
 
 function applyLanguageToOutputName(outputName: string, language: string): string {
@@ -73,18 +94,24 @@ function describeProgress(
     return "Transcript ready to export.";
   }
 
-  return "Everything runs locally in the browser after the model download finishes.";
+  return "Ready when you are.";
 }
 
 export default function App() {
   const installState = useInstallPrompt();
-  const workerRef = useRef<TranscriptionWorkerClient | WhisperCppWorkerClient | null>(null);
-  const backendRef = useRef<TranscriptionBackendId>(initialAppState.transcriptionBackend);
+  const workerRef = useRef<WhisperCppWorkerClient | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [state, setState] = useState(initialAppState);
   const [dragging, setDragging] = useState(false);
+  const narrow = useNarrowLayout();
+  const [mobileSection, setMobileSection] = useState<MobileSection>("upload");
 
-  backendRef.current = state.transcriptionBackend;
+  const mobileStepIndex = useMemo(
+    () => Math.max(0, MOBILE_SECTION_ORDER.indexOf(mobileSection)),
+    [mobileSection]
+  );
+  const mobileNextSection =
+    mobileStepIndex < MOBILE_SECTION_ORDER.length - 1 ? MOBILE_SECTION_ORDER[mobileStepIndex + 1]! : null;
 
   const workerListeners: WorkerListeners = {
     onReady: (available, capabilities) => {
@@ -132,10 +159,7 @@ export default function App() {
         ...current,
         transcript: {
           ...result,
-          outputName:
-            current.transcriptionBackend === "whispercpp"
-              ? applyLanguageToOutputName(result.outputName, current.language)
-              : result.outputName
+          outputName: applyLanguageToOutputName(result.outputName, current.language)
         },
         busy: false,
         error: null,
@@ -156,16 +180,9 @@ export default function App() {
     }
   };
 
-  function bootWorker(backend: TranscriptionBackendId): TranscriptionWorkerClient | WhisperCppWorkerClient {
+  function bootWorker(): WhisperCppWorkerClient {
     workerRef.current?.terminate();
-    if (backend === "whispercpp") {
-      const worker = new WhisperCppWorkerClient(workerListeners);
-      workerRef.current = worker;
-      worker.post({ type: "init" });
-      return worker;
-    }
-
-    const worker = new TranscriptionWorkerClient(workerListeners);
+    const worker = new WhisperCppWorkerClient(workerListeners);
     workerRef.current = worker;
     worker.post({ type: "init" });
     return worker;
@@ -173,7 +190,7 @@ export default function App() {
 
   function resetWorker(): void {
     workerRef.current?.terminate();
-    bootWorker(backendRef.current);
+    bootWorker();
   }
 
   useEffect(() => {
@@ -190,16 +207,13 @@ export default function App() {
         return;
       }
 
-      const backend = meta.lastTranscriptionBackend ?? DEFAULT_TRANSCRIPTION_BACKEND;
-      const catalog = modelsForBackend(backend);
       const modelId =
-        meta.lastModelId && catalog.some((model) => model.id === meta.lastModelId)
+        meta.lastModelId && MODEL_CATALOG.some((model) => model.id === meta.lastModelId)
           ? meta.lastModelId
-          : defaultModelIdForBackend(backend);
+          : DEFAULT_WHISPER_CPP_MODEL_ID;
 
       setState((current) => ({
         ...current,
-        transcriptionBackend: backend,
         modelId,
         language: meta.lastLanguage ?? DEFAULT_LANGUAGE
       }));
@@ -211,31 +225,27 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const worker = bootWorker(state.transcriptionBackend);
-
+    const worker = bootWorker();
     return () => {
       worker.terminate();
       workerRef.current = null;
     };
-  }, [state.transcriptionBackend]);
-
-  const modelCatalog = useMemo(() => modelsForBackend(state.transcriptionBackend), [state.transcriptionBackend]);
+  }, []);
 
   const selectedModel = useMemo(
-    () => modelCatalog.find((model) => model.id === state.modelId) ?? modelCatalog[0],
-    [modelCatalog, state.modelId]
+    () => MODEL_CATALOG.find((model) => model.id === state.modelId) ?? MODEL_CATALOG[0],
+    [state.modelId]
   );
   const reportedDeviceMemory = useMemo(() => getReportedDeviceMemory(), []);
   const activeModelState = state.models[state.modelId];
-  const installedModelCount = modelCatalog.filter((model) => state.models[model.id]?.installed).length;
+  const installedModelCount = MODEL_CATALOG.filter((model) => state.models[model.id]?.installed).length;
   const whisperCppWarning = getWhisperCppBackendWarning(state.whisperCapabilities);
   const selectedLanguage =
     LANGUAGE_OPTIONS.find((option) => option.value === state.language) ?? LANGUAGE_OPTIONS[0];
   const transcriptWordCount = state.transcript?.text.trim().split(/\s+/).filter(Boolean).length ?? 0;
-  const transcriptCharacterCount = state.transcript?.text.length ?? 0;
   const selectedModelRuntimeWarning = getModelRuntimeWarning(selectedModel, reportedDeviceMemory);
   const autoLanguageWarning = getAutoLanguageWarning(
-    state.language as (typeof LANGUAGE_OPTIONS)[number]["value"],
+    selectedLanguage.value,
     state.selectedDuration
   );
   const canStart = Boolean(
@@ -243,19 +253,17 @@ export default function App() {
       activeModelState?.installed &&
       !state.busy &&
       !autoLanguageWarning &&
-      (state.transcriptionBackend !== "whispercpp" || !whisperCppWarning)
+      !whisperCppWarning
   );
   const canInstallSelectedModel = Boolean(
-    !state.busy &&
-      !activeModelState?.installed &&
-      (state.transcriptionBackend !== "whispercpp" || !whisperCppWarning)
+    !state.busy && !activeModelState?.installed && !whisperCppWarning
   );
   const progressValue = state.progress?.percent ?? 0;
   const progressDetails = state.progress?.chunkCount
     ? `Chunk ${state.progress.chunkIndex} of ${state.progress.chunkCount}`
     : state.transcript
-      ? `${transcriptWordCount} words ready`
-      : "Downloaded models stay in browser cache for later offline use.";
+      ? `${transcriptWordCount} words`
+      : "Models stay in this browser.";
   const statusSummary = describeProgress(
     state.transcript,
     state.progress?.message ?? null,
@@ -329,7 +337,7 @@ export default function App() {
   };
 
   const ensureModel = (modelId: string) => {
-    const model = modelCatalog.find((entry) => entry.id === modelId) ?? modelCatalog[0];
+    const model = MODEL_CATALOG.find((entry) => entry.id === modelId) ?? MODEL_CATALOG[0];
     setState((current) => ({
       ...current,
       modelId,
@@ -340,20 +348,12 @@ export default function App() {
         message: "Preparing model download..."
       }
     }));
-    if (state.transcriptionBackend === "whispercpp") {
-      const cppModel = getWhisperCppModelDefinition(modelId);
-      workerRef.current?.post({
-        type: "ensureModel",
-        modelId,
-        downloadUrl: whisperCppModelDownloadUrl(cppModel),
-        sizeBytes: cppModel.sizeBytes
-      });
-      return;
-    }
-
+    const cppModel = getWhisperCppModelDefinition(model.id);
     workerRef.current?.post({
       type: "ensureModel",
-      modelId
+      modelId: model.id,
+      downloadUrl: whisperCppModelDownloadUrl(cppModel),
+      sizeBytes: cppModel.sizeBytes
     });
   };
 
@@ -407,25 +407,16 @@ export default function App() {
       });
 
       await persistLastSelections(state.modelId, state.language);
-      const baseRequest = {
-        language: state.language as typeof DEFAULT_LANGUAGE,
-        modelId: state.modelId,
-        chunkSeconds: DEFAULT_CHUNK_SECONDS,
-        overlapSeconds: DEFAULT_OVERLAP_SECONDS
-      };
-      const request =
-        state.transcriptionBackend === "whispercpp"
-          ? {
-              ...baseRequest,
-              threads: Math.min(8, Math.max(1, Math.floor(navigator.hardwareConcurrency || 4))),
-              translate: false
-            }
-          : baseRequest;
 
       workerRef.current?.post(
         {
           type: "transcribe",
-          request,
+          request: {
+            language: selectedLanguage.value,
+            modelId: state.modelId,
+            threads: getRecommendedWhisperCppThreads(navigator.hardwareConcurrency),
+            translate: false
+          },
           audio: decoded,
           outputName: transcriptFileName(state.selectedFile)
         },
@@ -475,32 +466,48 @@ export default function App() {
     }
   };
 
+  const engineReady = state.workerReady && state.localRuntime;
+
   return (
-    <div className="app-shell">
+    <div className={`app-shell${narrow ? " app-shell--narrow" : ""}`}>
       <main className="app-frame">
         <header className="app-header">
           <div className="brand-column">
             <p className="brand-tag">WhisperDrop</p>
-            <h1>Local transcription in your browser.</h1>
-            <p className="brand-copy">
-              Upload audio, install a model once, and transcribe on the same device without
-              routing recordings through a server.
-            </p>
+            <h1>Transcribe audio on this device</h1>
+            {!narrow ? (
+              <p className="brand-copy">
+                Local whisper.cpp in the browser — your audio never leaves this machine.
+              </p>
+            ) : null}
           </div>
 
           <div className="header-status">
-            <div className="status-chip">
-              <span className={`status-dot ${state.workerReady ? "status-dot-green" : ""}`} />
-              <span>{state.workerReady ? "Worker online" : "Worker starting"}</span>
-            </div>
-            <div className="status-chip">
-              <span className={`status-dot ${state.localRuntime ? "status-dot-green" : ""}`} />
-              <span>{state.localRuntime ? "Runtime ready" : "Runtime loading"}</span>
-            </div>
+            {narrow ? (
+              <div className="status-chip">
+                <span className={`status-dot ${engineReady ? "status-dot-green" : ""}`} />
+                <span>
+                  {state.workerReady ? "Worker ready" : "Worker…"}
+                  {" · "}
+                  {state.localRuntime ? "Runtime ready" : "Runtime…"}
+                </span>
+              </div>
+            ) : (
+              <>
+                <div className="status-chip">
+                  <span className={`status-dot ${state.workerReady ? "status-dot-green" : ""}`} />
+                  <span>{state.workerReady ? "Worker online" : "Worker starting"}</span>
+                </div>
+                <div className="status-chip">
+                  <span className={`status-dot ${state.localRuntime ? "status-dot-green" : ""}`} />
+                  <span>{state.localRuntime ? "Runtime ready" : "Runtime loading"}</span>
+                </div>
+              </>
+            )}
             <div className="status-chip">
               <span className="status-dot status-dot-green" />
-                <span>
-                {installedModelCount}/{modelCatalog.length} models installed
+              <span>
+                Models {installedModelCount}/{MODEL_CATALOG.length}
               </span>
             </div>
             {state.installState.canInstall ? (
@@ -515,13 +522,62 @@ export default function App() {
           </div>
         </header>
 
-        <section className="workspace-grid">
+        {narrow ? (
+          <div className="mobile-nav-sticky">
+            <div className="mobile-section-bar">
+              <label className="mobile-section-label" htmlFor="mobile-section">
+                Vista (passo {mobileStepIndex + 1} di {MOBILE_SECTION_ORDER.length})
+              </label>
+              <select
+                id="mobile-section"
+                className="mobile-section-select"
+                value={mobileSection}
+                onChange={(event) => setMobileSection(event.target.value as MobileSection)}
+              >
+                <option value="upload">1 — Audio</option>
+                <option value="model">2 — Modello</option>
+                <option value="run">3 — Esecuzione</option>
+                <option value="output">4 — Trascrizione</option>
+              </select>
+            </div>
+            <div className="mobile-flow" aria-live="polite">
+              <div className="mobile-flow-steps" aria-hidden="true">
+                {MOBILE_SECTION_ORDER.map((id, index) => (
+                  <span
+                    key={id}
+                    className={`mobile-flow-dot ${index <= mobileStepIndex ? "mobile-flow-dot--done" : ""} ${
+                      index === mobileStepIndex ? "mobile-flow-dot--current" : ""
+                    }`}
+                  />
+                ))}
+              </div>
+              <p className="mobile-flow-hint">{MOBILE_FLOW_HINTS[mobileSection]}</p>
+              {mobileNextSection ? (
+                <button
+                  type="button"
+                  className="secondary-button mobile-flow-next"
+                  onClick={() => setMobileSection(mobileNextSection)}
+                >
+                  Continua → {MOBILE_SECTION_LABELS[mobileNextSection]}
+                </button>
+              ) : (
+                <p className="mobile-flow-end">Hai completato i passi: puoi usare il menu per rivedere una sezione.</p>
+              )}
+            </div>
+          </div>
+        ) : null}
+
+        <section
+          className={narrow ? "workspace-single" : "workspace-grid"}
+          aria-label={narrow ? "Active workspace section" : "Workspace"}
+        >
+          {(narrow ? mobileSection === "upload" : true) ? (
           <section className="panel panel-upload">
             <div className="panel-heading">
               <span className="panel-step">01</span>
               <div>
                 <p className="panel-label">Input</p>
-                <h2>Load audio</h2>
+                <h2>Audio</h2>
               </div>
             </div>
 
@@ -572,28 +628,20 @@ export default function App() {
               </strong>
               <p className="dropzone-copy">
                 {state.selectedFile
-                  ? "The file remains on this device. Decoding happens locally before inference."
-                  : "Supported formats: WAV, MP3, M4A, AAC, and OGG."}
+                  ? "Decoded locally before transcription."
+                  : "WAV, MP3, M4A, AAC, OGG."}
               </p>
               <span className="dropzone-file">{state.selectedFile?.name ?? "No file selected"}</span>
             </label>
 
-            <dl className="detail-list">
-              <div className="detail-item">
-                <dt>File</dt>
-                <dd>{state.selectedFile?.name ?? "Waiting for audio"}</dd>
-              </div>
+            <dl className="detail-list detail-list--compact">
               <div className="detail-item">
                 <dt>Size</dt>
-                <dd>{state.selectedFile ? formatBytes(state.selectedFile.size) : "0 B"}</dd>
+                <dd>{state.selectedFile ? formatBytes(state.selectedFile.size) : "—"}</dd>
               </div>
               <div className="detail-item">
                 <dt>Duration</dt>
                 <dd>{formatSeconds(state.selectedDuration)}</dd>
-              </div>
-              <div className="detail-item">
-                <dt>Mode</dt>
-                <dd>Fully local</dd>
               </div>
             </dl>
 
@@ -615,49 +663,19 @@ export default function App() {
               </button>
             </div>
           </section>
+          ) : null}
 
+          {(narrow ? mobileSection === "model" : true) ? (
           <section className="panel panel-controls">
             <div className="panel-heading">
               <span className="panel-step">02</span>
               <div>
                 <p className="panel-label">Model</p>
-                <h2>Choose the runtime</h2>
+                <h2>Model &amp; language</h2>
               </div>
             </div>
 
             <div className="control-grid">
-              <label className="control-field" htmlFor="backend">
-                <span>Inference engine</span>
-                <select
-                  id="backend"
-                  value={state.transcriptionBackend}
-                  onChange={(event) => {
-                    const backend = event.target.value as TranscriptionBackendId;
-                    void persistTranscriptionBackend(backend);
-                    setState((current) => ({
-                      ...current,
-                      transcriptionBackend: backend,
-                      modelId: defaultModelIdForBackend(backend),
-                      models: {},
-                      transcript: null,
-                      error: null,
-                      workerReady: false,
-                      localRuntime: false,
-                      whisperCapabilities: null
-                    }));
-                  }}
-                >
-                  {TRANSCRIPTION_BACKENDS.map((entry) => (
-                    <option key={entry.id} value={entry.id}>
-                      {entry.label}
-                    </option>
-                  ))}
-                </select>
-                <p className="control-hint">
-                  {TRANSCRIPTION_BACKENDS.find((entry) => entry.id === state.transcriptionBackend)?.description}
-                </p>
-              </label>
-
               <label className="control-field" htmlFor="language">
                 <span>Language</span>
                 <select
@@ -680,7 +698,7 @@ export default function App() {
                 {autoLanguageWarning ? <p className="inline-error">{autoLanguageWarning}</p> : null}
               </label>
 
-              {state.transcriptionBackend === "whispercpp" && whisperCppWarning ? (
+              {whisperCppWarning ? (
                 <p className="inline-error control-grid-full">{whisperCppWarning}</p>
               ) : null}
 
@@ -696,7 +714,7 @@ export default function App() {
                     }))
                   }
                 >
-                  {modelCatalog.map((model) => (
+                  {MODEL_CATALOG.map((model) => (
                     <option key={model.id} value={model.id}>
                       {model.label}
                     </option>
@@ -705,38 +723,16 @@ export default function App() {
               </label>
             </div>
 
-            <article className="selected-model">
-              <div className="selected-model-copy">
-                <p className="panel-label">Current pick</p>
-                <h3>{selectedModel.label}</h3>
-                <p>{selectedModel.recommendedFor}</p>
-                {selectedModelRuntimeWarning ? (
-                  <p className="inline-error">{selectedModelRuntimeWarning}</p>
-                ) : null}
-              </div>
-              <div className="selected-model-meta">
-                <span className="mono-pill">{formatBytes(selectedModel.sizeBytes)}</span>
-                {reportedDeviceMemory !== null ? (
-                  <span className="mono-pill mono-pill-neutral">
-                    Browser memory: {reportedDeviceMemory} GB
-                  </span>
-                ) : null}
-                <span
-                  className={`mono-pill ${
-                    activeModelState?.installed ? "mono-pill-green" : "mono-pill-neutral"
-                  }`}
-                >
-                  {activeModelState?.pending
-                    ? "Downloading"
-                    : activeModelState?.installed
-                      ? "Installed"
-                      : "Not installed"}
-                </span>
-              </div>
-            </article>
+            <p className="control-hint">
+              Current: <strong>{selectedModel.label}</strong>
+              {activeModelState?.installed ? " — installed" : activeModelState?.pending ? " — downloading" : " — not installed"}
+              {selectedModelRuntimeWarning ? (
+                <span className="inline-error"> {selectedModelRuntimeWarning}</span>
+              ) : null}
+            </p>
 
             <div className="model-list" role="list" aria-label="Available transcription models">
-              {modelCatalog.map((model) => {
+              {MODEL_CATALOG.map((model) => {
                 const install = state.models[model.id];
                 const installed = Boolean(install?.installed);
                 const pending = Boolean(install?.pending);
@@ -746,8 +742,9 @@ export default function App() {
                 return (
                   <article
                     key={model.id}
-                    className={`model-row ${selected ? "model-row-selected" : ""}`}
+                    className={`model-row model-row--compact ${selected ? "model-row-selected" : ""}`}
                     role="listitem"
+                    title={model.recommendedFor}
                   >
                     <div className="model-row-copy">
                       <div className="model-row-title">
@@ -756,7 +753,6 @@ export default function App() {
                           {formatBytes(model.sizeBytes)}
                         </span>
                       </div>
-                      <p>{model.recommendedFor}</p>
                       {runtimeWarning ? <p className="inline-error">{runtimeWarning}</p> : null}
                       {install?.error ? <p className="inline-error">{install.error}</p> : null}
                     </div>
@@ -789,7 +785,7 @@ export default function App() {
                           className="ghost-button"
                           type="button"
                           onClick={() => ensureModel(model.id)}
-                        disabled={state.busy || pending}
+                          disabled={state.busy || pending}
                         >
                           {pending ? "Downloading..." : "Download"}
                         </button>
@@ -800,13 +796,15 @@ export default function App() {
               })}
             </div>
           </section>
+          ) : null}
 
+          {(narrow ? mobileSection === "run" : true) ? (
           <section className="panel panel-run" aria-live="polite">
             <div className="panel-heading">
               <span className="panel-step">03</span>
               <div>
                 <p className="panel-label">Run</p>
-                <h2>Watch the pipeline</h2>
+                <h2>Progress</h2>
               </div>
             </div>
 
@@ -817,24 +815,16 @@ export default function App() {
                   {state.progress ? humanProgress(progressValue) : "Idle"}
                 </span>
               </div>
-              <div className="progress-track" aria-hidden="true">
+              <div
+                className={`progress-track${
+                  state.progress?.stage === "transcribe" ? " progress-track--busy" : ""
+                }`}
+                aria-hidden="true"
+              >
                 <div className="progress-fill" style={{ width: `${progressValue}%` }} />
               </div>
               <p className="run-copy">{progressDetails}</p>
             </article>
-
-            <div className="signal-grid">
-              <article className="signal-card">
-                <span className="panel-label">Language</span>
-                <strong>{selectedLanguage.label}</strong>
-                <p>{state.language === "auto" ? "Detected on the fly." : "Locked before decoding."}</p>
-              </article>
-              <article className="signal-card">
-                <span className="panel-label">Runtime</span>
-                <strong>{state.localRuntime ? "Browser ready" : "Preparing"}</strong>
-                <p>{state.workerReady ? "Worker is online." : "Worker boot is still in progress."}</p>
-              </article>
-            </div>
 
             {state.error ? (
               <div className="error-box" role="alert">
@@ -867,23 +857,23 @@ export default function App() {
               ) : null}
             </div>
           </section>
+          ) : null}
 
+          {(narrow ? mobileSection === "output" : true) ? (
           <section className="panel panel-output">
             <div className="panel-heading">
               <span className="panel-step">04</span>
               <div>
                 <p className="panel-label">Output</p>
-                <h2>Review the transcript</h2>
+                <h2>Transcript</h2>
               </div>
             </div>
 
             <div className="output-toolbar">
               <span className="mono-pill mono-pill-neutral">
-                {state.transcript ? formatSeconds(state.transcript.durationSeconds) : "No transcript"}
+                {state.transcript ? formatSeconds(state.transcript.durationSeconds) : "—"}
               </span>
               <span className="mono-pill mono-pill-neutral">{transcriptWordCount} words</span>
-              <span className="mono-pill mono-pill-neutral">{transcriptCharacterCount} chars</span>
-              <span className="mono-pill mono-pill-green">{selectedModel.label}</span>
             </div>
 
             <textarea
@@ -915,6 +905,7 @@ export default function App() {
               </button>
             </div>
           </section>
+          ) : null}
         </section>
       </main>
     </div>

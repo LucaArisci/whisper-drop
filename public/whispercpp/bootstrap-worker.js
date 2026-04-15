@@ -13,18 +13,26 @@
   var REGISTRY = {
     "wc-tiny-q5": { label: "Tiny (Q5_1)", sizeBytes: 31 * 1024 * 1024 },
     "wc-base-q5": { label: "Base (Q5_1)", sizeBytes: 57 * 1024 * 1024 },
-    "wc-turbo-q5": {
-      label: "Large v3 Turbo (Q5_0, experimental)",
-      sizeBytes: 574 * 1024 * 1024
-    }
+    "wc-small-q5": { label: "Small (Q5_1)", sizeBytes: 190085487 }
   };
 
   var runtimeReady = false;
   var runtimePromise = null;
   var instance = null;
   var loadedModelId = null;
+  var cachedModelBuf = null;
+  var cachedModelId = null;
   var printBuffer = [];
   var cancelRequested = false;
+  /** While whisper.cpp is running `full_default` / draining pthread logs */
+  var transcribeActive = false;
+  /** Audio duration (seconds) for the active transcribe job — used to estimate segment progress */
+  var transcribeDurationSec = 0;
+  /** Monotonic UI percent during transcribe (8–97 before finalize) */
+  var transcribeProgressPct = 8;
+  var transcribeProgressLastEmitMs = 0;
+
+  var SEGMENT_LINE_RE = /^\[[\d:.]+\s*-->\s*[\d:.]+\]/;
 
   function post(msg) {
     self.postMessage(msg);
@@ -137,20 +145,26 @@
       if (arguments.length > 1) {
         text = Array.prototype.slice.call(arguments).join(" ");
       }
-      printBuffer.push(String(text));
+      var line = String(text);
+      printBuffer.push(line);
+      if (line.indexOf("system_info:") !== -1) {
+        console.info("[whisper.cpp]", line);
+      }
       if (printBuffer.length > 400) {
         printBuffer = printBuffer.slice(-300);
       }
-      if (printBuffer.length % 25 === 0) {
-        post({
-          type: "progress",
-          progress: {
-            stage: "transcribe",
-            percent: Math.min(92, 12 + printBuffer.length / 8),
-            message: "Transcribing…"
-          }
-        });
+      if (!transcribeActive) {
+        return;
       }
+      var segCount = countSegmentLines(printBuffer);
+      var lineCount = printBuffer.length;
+      var dur = transcribeDurationSec > 0 ? transcribeDurationSec : 1;
+      var expectedSeg = Math.max(2, Math.ceil(dur / 4.5));
+      var fromSeg = 10 + (segCount / expectedSeg) * 72;
+      var fromLines = 10 + Math.min(68, (lineCount / Math.max(100, dur * 10)) * 58);
+      var fromLog = 10 + (Math.log1p(lineCount) / Math.log1p(900)) * 52;
+      var blended = Math.max(fromSeg, fromLines, fromLog);
+      emitTranscribeProgress(blended, "Transcribing…");
     };
     M.printErr = M.print;
     M.setStatus = function () {};
@@ -160,6 +174,12 @@
   function loadMainScript() {
     var url = self.location.origin + "/whispercpp/main.js";
     setupModulePreScript();
+
+    // Tell Emscripten where main.js lives so pthread sub-workers can
+    // importScripts the correct URL.  Without this, _scriptName resolves
+    // to the bootstrap-worker URL and pthread spawning silently fails.
+    self.Module.mainScriptUrlOrBlob = url;
+
     return new Promise(function (resolve, reject) {
       self.Module.onRuntimeInitialized = function () {
         runtimeReady = true;
@@ -266,6 +286,40 @@
       });
   }
 
+  function countSegmentLines(lines) {
+    var n = 0;
+    for (var i = 0; i < lines.length; i++) {
+      if (SEGMENT_LINE_RE.test(lines[i])) {
+        n++;
+      }
+    }
+    return n;
+  }
+
+  /**
+   * Throttled monotonic progress during transcribe. whisper.cpp prints many lines;
+   * we map segment count + line count to a percent so the bar moves smoothly instead of
+   * jumping 10 → 15 → 100.
+   */
+  function emitTranscribeProgress(nextPct, message) {
+    var msg = message || "Transcribing…";
+    var p = Math.min(97, Math.max(transcribeProgressPct, nextPct));
+    var now = performance.now();
+    if (p <= transcribeProgressPct + 0.35 && now - transcribeProgressLastEmitMs < 220) {
+      return;
+    }
+    transcribeProgressPct = p;
+    transcribeProgressLastEmitMs = now;
+    post({
+      type: "progress",
+      progress: {
+        stage: "transcribe",
+        percent: Math.round(transcribeProgressPct),
+        message: msg
+      }
+    });
+  }
+
   function parseTranscriptFromPrint(lines) {
     var re = /^\[[\d:.]+\s*-->\s*[\d:.]+\]\s*(.*)$/;
     var parts = [];
@@ -281,20 +335,33 @@
 
   function waitForTranscriptionEnd(timeoutMs) {
     var deadline = Date.now() + timeoutMs;
+    var waitStart = Date.now();
+    var lastWaitRampEmit = 0;
     return new Promise(function (resolve, reject) {
       function tick() {
         if (cancelRequested) {
+          transcribeActive = false;
           reject(new Error("Transcription cancelled."));
           return;
         }
         var blob = printBuffer.join("\n");
         if (blob.indexOf("total time =") !== -1 && blob.indexOf("encode time =") !== -1) {
+          transcribeActive = false;
           resolve();
           return;
         }
         if (Date.now() > deadline) {
+          transcribeActive = false;
           reject(new Error("Transcription timed out."));
           return;
+        }
+        var now = Date.now();
+        if (now - lastWaitRampEmit >= 120) {
+          lastWaitRampEmit = now;
+          var elapsed = now - waitStart;
+          var headroom = 97 - transcribeProgressPct;
+          var ramp = headroom * (1 - Math.exp(-elapsed / 3200));
+          emitTranscribeProgress(transcribeProgressPct + ramp, "Finishing up…");
         }
         setTimeout(tick, 40);
       }
@@ -347,6 +414,7 @@
         }
       })
       .catch(function (err) {
+        transcribeActive = false;
         post({
           type: "error",
           message: err instanceof Error ? err.message : String(err)
@@ -406,6 +474,13 @@
             return idbPut(modelId, buf);
           })
           .then(function () {
+            if (cachedModelId === modelId) {
+              cachedModelBuf = null;
+              cachedModelId = null;
+            }
+            if (loadedModelId === modelId) {
+              freeInstance();
+            }
             post({
               type: "modelState",
               state: {
@@ -435,6 +510,10 @@
 
   function handleDeleteModel(modelId) {
     return idbDelete(modelId).then(function () {
+      if (cachedModelId === modelId) {
+        cachedModelBuf = null;
+        cachedModelId = null;
+      }
       if (loadedModelId === modelId) {
         freeInstance();
       }
@@ -462,40 +541,55 @@
 
     return ensureRuntime()
       .then(function () {
+        if (cachedModelId === modelId && cachedModelBuf) {
+          return cachedModelBuf;
+        }
         return idbGet(modelId);
       })
       .then(function (buf) {
         if (!buf || !buf.byteLength) {
           throw new Error("Model is not installed. Download it before transcribing.");
         }
+
+        cachedModelId = modelId;
+        cachedModelBuf = buf;
+
         post({
           type: "progress",
           progress: { stage: "prepare", percent: 5, message: "Loading model into runtime…" }
         });
-        storeFS("whisper.bin", buf);
+
         if (loadedModelId !== modelId) {
           freeInstance();
-        }
-        if (!instance) {
+          storeFS("whisper.bin", buf);
           instance = self.Module.init("whisper.bin");
           loadedModelId = modelId;
         }
+
         if (!instance) {
           throw new Error("Whisper model failed to load in the WASM runtime.");
         }
         var samples = new Float32Array(audio.samples.buffer, audio.samples.byteOffset, audio.samples.length);
         printBuffer = [];
+        transcribeDurationSec = typeof audio.durationSeconds === "number" ? audio.durationSeconds : 0;
+        transcribeProgressPct = 9;
+        transcribeProgressLastEmitMs = 0;
+        transcribeActive = true;
         post({
           type: "progress",
-          progress: { stage: "transcribe", percent: 10, message: "Running whisper.cpp…" }
+          progress: { stage: "transcribe", percent: 9, message: "Running whisper.cpp…" }
         });
         var ret = self.Module.full_default(instance, samples, lang, nthreads, translate);
         if (ret !== 0) {
+          transcribeActive = false;
           throw new Error("whisper.cpp returned error code " + ret);
         }
+        emitTranscribeProgress(Math.max(transcribeProgressPct, 86), "Waiting for workers…");
         return waitForTranscriptionEnd(35 * 60 * 1000);
       })
       .then(function () {
+        transcribeActive = false;
+        emitTranscribeProgress(98, "Collecting transcript…");
         var text = parseTranscriptFromPrint(printBuffer);
         if (!text) {
           throw new Error("Empty transcript. Try another language or a clearer recording.");

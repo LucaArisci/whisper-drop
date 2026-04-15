@@ -1,16 +1,14 @@
-import { DEFAULT_LANGUAGE, DEFAULT_MODEL_ID } from "./constants";
-import { DEFAULT_TRANSCRIPTION_BACKEND } from "./lib/transcription-backend";
+import { DEFAULT_LANGUAGE } from "./constants";
+import { DEFAULT_WHISPER_CPP_MODEL_ID } from "./lib/whispercpp-models";
 import type {
   InstallPromptState,
   ModelInstallState,
-  TranscriptionBackendId,
   TranscriptResult,
   TranscriptionProgress,
   WhisperCppRuntimeCapabilities
 } from "./types";
 
 export interface AppState {
-  transcriptionBackend: TranscriptionBackendId;
   whisperCapabilities: WhisperCppRuntimeCapabilities | null;
   modelId: string;
   language: string;
@@ -27,9 +25,8 @@ export interface AppState {
 }
 
 export const initialAppState: AppState = {
-  transcriptionBackend: DEFAULT_TRANSCRIPTION_BACKEND,
   whisperCapabilities: null,
-  modelId: DEFAULT_MODEL_ID,
+  modelId: DEFAULT_WHISPER_CPP_MODEL_ID,
   language: DEFAULT_LANGUAGE,
   installState: {
     canInstall: false,
