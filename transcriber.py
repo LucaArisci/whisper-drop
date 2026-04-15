@@ -76,8 +76,8 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("WhisperDrop")
-        self.geometry("820x900")
-        self.minsize(720, 620)
+        self.geometry("1200x780")
+        self.minsize(900, 620)
         self.configure(bg=BG)
 
         self.app_dir = Path(__file__).resolve().parent
@@ -130,11 +130,19 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         root = tk.Frame(self, bg=BG, padx=28, pady=24)
         root.grid(sticky="nsew")
-        root.grid_columnconfigure(0, weight=1)
-        root.grid_rowconfigure(4, weight=1)
 
+        # Two main columns: left (controls) and right (log)
+        root.grid_columnconfigure(0, weight=1, uniform="col")
+        root.grid_columnconfigure(1, weight=1, uniform="col")
+
+        # Rows: header, file, options, action — log spans rows 1-3
+        root.grid_rowconfigure(1, weight=0)
+        root.grid_rowconfigure(2, weight=0)
+        root.grid_rowconfigure(3, weight=1)
+
+        # ── Header (spans both columns) ──────────────────────────────────────
         header = tk.Frame(root, bg=BG)
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 18))
+        header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 18))
         header.grid_columnconfigure(0, weight=1)
 
         tk.Label(
@@ -153,8 +161,9 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         ).grid(row=1, column=0, sticky="w", pady=(6, 0))
         tk.Frame(header, bg=GREEN, height=3, width=96).grid(row=2, column=0, sticky="w", pady=(14, 0))
 
+        # ── File card (left column) ───────────────────────────────────────────
         file_card = tk.Frame(root, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
-        file_card.grid(row=1, column=0, sticky="ew")
+        file_card.grid(row=1, column=0, sticky="ew", padx=(0, 10))
         file_card.grid_columnconfigure(0, weight=1)
 
         tk.Label(
@@ -258,8 +267,9 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         )
         self.file_help_label.grid(row=1, column=0, sticky="ew", pady=(4, 0))
 
+        # ── Options (left column) ─────────────────────────────────────────────
         options = tk.Frame(root, bg=BG)
-        options.grid(row=2, column=0, sticky="ew", pady=(18, 18))
+        options.grid(row=2, column=0, sticky="ew", padx=(0, 10), pady=(18, 18))
         options.grid_columnconfigure(0, weight=1)
         options.grid_columnconfigure(1, weight=1)
         options.grid_rowconfigure(0, weight=1)
@@ -313,8 +323,9 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             anchor="w",
         ).pack(fill="x", padx=16, pady=(0, 14))
 
+        # ── Action card (left column) ─────────────────────────────────────────
         action_card = tk.Frame(root, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
-        action_card.grid(row=3, column=0, sticky="ew", pady=(0, 18))
+        action_card.grid(row=3, column=0, sticky="nsew", padx=(0, 10), pady=(0, 0))
         action_card.grid_columnconfigure(0, weight=1)
 
         self.run_btn_frame = tk.Frame(
@@ -359,8 +370,9 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         )
         self.status_label.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 18))
 
+        # ── Log card (right column, spans rows 1-3) ───────────────────────────
         log_card = tk.Frame(root, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
-        log_card.grid(row=4, column=0, sticky="nsew")
+        log_card.grid(row=1, column=1, rowspan=3, sticky="nsew", padx=(10, 0))
         log_card.grid_columnconfigure(0, weight=1)
         log_card.grid_rowconfigure(1, weight=1)
 
@@ -374,7 +386,6 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         self.log = ScrolledText(
             log_card,
-            height=10,
             wrap="word",
             bg=BG,
             fg=TEXT,
