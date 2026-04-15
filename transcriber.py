@@ -9,7 +9,6 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from tkinter.scrolledtext import ScrolledText
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -71,6 +70,9 @@ RED_SOFT = "#2a0d0d"
 UI_FONT = ".AppleSystemUIFont" if os.name == "posix" and "darwin" in sys.platform else "Helvetica"
 MONO_FONT = "SF Mono" if os.name == "posix" and "darwin" in sys.platform else "Menlo"
 
+SCROLLBAR_WIDTH = 10
+THUMB_MIN_HEIGHT = 30
+
 
 class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
     def __init__(self):
@@ -84,6 +86,11 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self.model_dir = self.app_dir / ".models" / "whisper.cpp"
         self.file_path = None
         self.output_dir = None
+
+        self._scroll_top = 0.0
+        self._scroll_bottom = 1.0
+        self._scroll_drag_start_y = None
+        self._scroll_drag_start_top = None
 
         default_model = "Turbo Q5"
         self.file_var = tk.StringVar(value="No file selected")
@@ -131,16 +138,14 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         root = tk.Frame(self, bg=BG, padx=28, pady=24)
         root.grid(sticky="nsew")
 
-        # Two main columns: left (controls) and right (log)
         root.grid_columnconfigure(0, weight=1, uniform="col")
         root.grid_columnconfigure(1, weight=1, uniform="col")
 
-        # Rows: header, file, options, action — log spans rows 1-3
         root.grid_rowconfigure(1, weight=0)
         root.grid_rowconfigure(2, weight=0)
         root.grid_rowconfigure(3, weight=1)
 
-        # ── Header (spans both columns) ──────────────────────────────────────
+        # ── Header ───────────────────────────────────────────────────────────
         header = tk.Frame(root, bg=BG)
         header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 18))
         header.grid_columnconfigure(0, weight=1)
@@ -161,7 +166,7 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         ).grid(row=1, column=0, sticky="w", pady=(6, 0))
         tk.Frame(header, bg=GREEN, height=3, width=96).grid(row=2, column=0, sticky="w", pady=(14, 0))
 
-        # ── File card (left column) ───────────────────────────────────────────
+        # ── File card ─────────────────────────────────────────────────────────
         file_card = tk.Frame(root, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
         file_card.grid(row=1, column=0, sticky="ew", padx=(0, 10))
         file_card.grid_columnconfigure(0, weight=1)
@@ -267,7 +272,7 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         )
         self.file_help_label.grid(row=1, column=0, sticky="ew", pady=(4, 0))
 
-        # ── Options (left column) ─────────────────────────────────────────────
+        # ── Options ───────────────────────────────────────────────────────────
         options = tk.Frame(root, bg=BG)
         options.grid(row=2, column=0, sticky="ew", padx=(0, 10), pady=(18, 18))
         options.grid_columnconfigure(0, weight=1)
@@ -323,9 +328,9 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             anchor="w",
         ).pack(fill="x", padx=16, pady=(0, 14))
 
-        # ── Action card (left column) ─────────────────────────────────────────
+        # ── Action card ───────────────────────────────────────────────────────
         action_card = tk.Frame(root, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
-        action_card.grid(row=3, column=0, sticky="nsew", padx=(0, 10), pady=(0, 0))
+        action_card.grid(row=3, column=0, sticky="nsew", padx=(0, 10))
         action_card.grid_columnconfigure(0, weight=1)
 
         self.run_btn_frame = tk.Frame(
@@ -384,8 +389,13 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             fg=TEXT,
         ).grid(row=0, column=0, sticky="w", padx=18, pady=(16, 8))
 
-        self.log = ScrolledText(
-            log_card,
+        log_frame = tk.Frame(log_card, bg=BG)
+        log_frame.grid(row=1, column=0, sticky="nsew", padx=18, pady=(0, 18))
+        log_frame.grid_columnconfigure(0, weight=1)
+        log_frame.grid_rowconfigure(0, weight=1)
+
+        self.log = tk.Text(
+            log_frame,
             wrap="word",
             bg=BG,
             fg=TEXT,
@@ -394,13 +404,66 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             font=(MONO_FONT, 11),
             padx=12,
             pady=12,
+            yscrollcommand=self._update_scrollbar,
         )
-        self.log.grid(row=1, column=0, sticky="nsew", padx=18, pady=(0, 18))
+        self.log.grid(row=0, column=0, sticky="nsew")
         self.log.config(state="disabled")
+
+        # Custom canvas scrollbar
+        self._scroll_canvas = tk.Canvas(
+            log_frame,
+            width=SCROLLBAR_WIDTH + 1,
+            bg=BG,
+            highlightthickness=0,
+            bd=0,
+        )
+        self._scroll_canvas.grid(row=0, column=1, sticky="ns", padx=(4, 0))
+
+        self._scroll_thumb = self._scroll_canvas.create_rectangle(
+            1, 0, SCROLLBAR_WIDTH - 1, THUMB_MIN_HEIGHT,
+            fill=GREEN_SOFT,
+            outline=GREEN,
+            width=1,
+        )
+
+        self._scroll_canvas.bind("<ButtonPress-1>", self._scroll_click)
+        self._scroll_canvas.bind("<B1-Motion>", self._scroll_drag)
+        self._scroll_canvas.bind("<Enter>", lambda e: self._scroll_canvas.itemconfig(self._scroll_thumb, fill="#0f2e1a"))
+        self._scroll_canvas.bind("<Leave>", lambda e: self._scroll_canvas.itemconfig(self._scroll_thumb, fill=GREEN_SOFT))
 
         self._set_drop_zone_hover(False)
         self._set_status("Ready", "neutral")
         self._log("Ready. whisper.cpp backend is active.")
+
+    def _update_scrollbar(self, top, bottom):
+        self._scroll_top = float(top)
+        self._scroll_bottom = float(bottom)
+        self._scroll_canvas.update_idletasks()
+        h = self._scroll_canvas.winfo_height()
+        if h <= 0:
+            return
+        y0 = int(self._scroll_top * h)
+        y1 = int(self._scroll_bottom * h)
+        thumb_h = max(y1 - y0, THUMB_MIN_HEIGHT)
+        # Clamp so thumb doesn't overflow
+        if y0 + thumb_h > h:
+            y0 = h - thumb_h
+        self._scroll_canvas.coords(self._scroll_thumb, 0, y0, SCROLLBAR_WIDTH, y0 + thumb_h - 1)
+
+    def _scroll_click(self, event):
+        h = self._scroll_canvas.winfo_height()
+        if h <= 0:
+            return
+        self._scroll_drag_start_y = event.y
+        self._scroll_drag_start_top = self._scroll_top
+        self.log.yview_moveto(event.y / h)
+
+    def _scroll_drag(self, event):
+        h = self._scroll_canvas.winfo_height()
+        if h <= 0 or self._scroll_drag_start_y is None:
+            return
+        delta = (event.y - self._scroll_drag_start_y) / h
+        self.log.yview_moveto(self._scroll_drag_start_top + delta)
 
     def _bind_shortcuts(self):
         self.bind("<Return>", self._on_enter_key)
