@@ -10,7 +10,7 @@ WhisperDrop is a local-first Progressive Web App that keeps transcription on the
 - Browser-side decode + resample to 16 kHz mono
 - **whisper.cpp** in a dedicated Web Worker (WASM + pthreads when cross-origin isolated)
 - GGML models downloaded from Hugging Face (`ggerganov/whisper.cpp`) into IndexedDB in the worker
-- Transcript preview, copy, and `.txt` export
+- Transcript preview, copy, and ` .txt` export
 - Original macOS/Tkinter implementation preserved in `legacy/`
 
 ## Inference runtime
