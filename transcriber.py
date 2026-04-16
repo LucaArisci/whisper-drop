@@ -1,3 +1,4 @@
+import ctypes
 import os
 import shutil
 import subprocess
@@ -7,6 +8,7 @@ import threading
 import tkinter as tk
 import urllib.error
 import urllib.request
+from ctypes import wintypes
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -85,8 +87,6 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("WhisperDrop")
-        self.geometry("1200x780")
-        self.minsize(900, 620)
         self.configure(bg=BG)
 
         self.app_dir = Path(__file__).resolve().parent
@@ -107,11 +107,34 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self.model_var = tk.StringVar(value=default_model)
         self.model_help_var = tk.StringVar(value=MODELS[default_model]["description"])
 
+        self._configure_window_size()
         self._build_ui()
         self._bind_shortcuts()
 
     def _run_command(self, cmd):
         return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+    def _binary_dir(self, binary_path):
+        return Path(binary_path).resolve().parent
+
+    def _get_work_area(self):
+        if os.name == "nt":
+            rect = wintypes.RECT()
+            if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
+                return rect.right - rect.left, rect.bottom - rect.top
+        return self.winfo_screenwidth(), self.winfo_screenheight()
+
+    def _configure_window_size(self):
+        work_w, work_h = self._get_work_area()
+        target_w = min(1280, max(960, work_w - 48))
+        target_h = min(920, max(720, work_h - 36))
+        min_w = min(960, max(820, work_w - 80))
+        min_h = min(700, max(620, work_h - 80))
+        pos_x = max(20, (work_w - target_w) // 2)
+        pos_y = max(20, (work_h - target_h) // 2)
+
+        self.geometry(f"{target_w}x{target_h}+{pos_x}+{pos_y}")
+        self.minsize(min_w, min_h)
 
     def _build_ui(self):
         style = ttk.Style()
@@ -571,6 +594,13 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         return None
 
+    def _detect_whisper_backend(self, whisper_cpp):
+        binary_dir = self._binary_dir(whisper_cpp)
+        has_vulkan = (binary_dir / "ggml-vulkan.dll").exists()
+        if has_vulkan:
+            return "vulkan"
+        return "cpu"
+
     def _download_model(self, model_name, model_info):
         self.model_dir.mkdir(parents=True, exist_ok=True)
         model_path = self.model_dir / model_info["filename"]
@@ -660,6 +690,7 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         output_base = self._next_output_base()
         threads = max(1, min(8, os.cpu_count() or 4))
+        backend = self._detect_whisper_backend(whisper_cpp)
         cmd = [
             whisper_cpp,
             "--model",
@@ -676,12 +707,26 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         ]
 
         self._ui(self._set_status, f"Transcribing with {model_name}...", "neutral")
-        self._ui(self._log, f"Starting whisper.cpp with model '{model_name}'.")
+        if backend == "vulkan":
+            self._ui(self._log, "Starting whisper.cpp with Vulkan GPU backend.")
+        else:
+            self._ui(self._log, "Starting whisper.cpp with CPU backend.")
         result = self._run_command(cmd)
 
         if result.returncode != 0:
-            error_output = result.stderr.strip() or result.stdout.strip() or "Unknown whisper.cpp error."
-            raise RuntimeError(error_output)
+            if backend == "vulkan":
+                self._ui(self._log, "Vulkan backend failed. Retrying on CPU...")
+                cpu_cmd = cmd + ["--no-gpu"]
+                cpu_result = self._run_command(cpu_cmd)
+                if cpu_result.returncode == 0:
+                    result = cpu_result
+                    backend = "cpu-fallback"
+                else:
+                    error_output = cpu_result.stderr.strip() or cpu_result.stdout.strip() or result.stderr.strip() or result.stdout.strip() or "Unknown whisper.cpp error."
+                    raise RuntimeError(error_output)
+            else:
+                error_output = result.stderr.strip() or result.stdout.strip() or "Unknown whisper.cpp error."
+                raise RuntimeError(error_output)
 
         output_file = output_base.with_suffix(".txt")
         if not output_file.exists():
@@ -690,6 +735,11 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         cli_output = (result.stdout or result.stderr or "").strip()
         if cli_output:
             self._ui(self._log, cli_output)
+
+        if backend == "cpu-fallback":
+            self._ui(self._log, "Transcription completed on CPU fallback.")
+        elif backend == "vulkan":
+            self._ui(self._log, "Transcription completed with Vulkan GPU backend.")
 
         return output_file
 

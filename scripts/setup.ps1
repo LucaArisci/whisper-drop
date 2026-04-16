@@ -6,7 +6,6 @@ $ReqFile = Join-Path $AppDir "requirements.txt"
 $ToolsDir = Join-Path $AppDir ".tools"
 $WhisperRepoDir = Join-Path $ToolsDir "whisper.cpp"
 $FfmpegDir = Join-Path $ToolsDir "ffmpeg"
-$NinjaDir = Join-Path $ToolsDir "ninja"
 
 function Write-Section {
     param([string]$Title)
@@ -34,12 +33,6 @@ function Find-CommandPath {
         )
         "cmake" = @(
             "C:\Program Files\CMake\bin\cmake.exe"
-        )
-        "clang" = @(
-            "C:\Program Files\LLVM\bin\clang.exe"
-        )
-        "clang++" = @(
-            "C:\Program Files\LLVM\bin\clang++.exe"
         )
         "python" = @(
             "C:\Users\$env:USERNAME\AppData\Local\Programs\Python\Python311\python.exe",
@@ -193,37 +186,96 @@ function Ensure-Ffmpeg {
     return $resolved
 }
 
-function Ensure-Ninja {
-    $existing = Find-CommandPath @("ninja")
-    if ($existing) {
-        Write-Host "Using Ninja:"
-        Write-Host "  $existing"
-        return $existing
+function Ensure-BuildTools {
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+    if (Test-Path $vswhere) {
+        $installPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        if ($installPath) {
+            Write-Host "Using Visual Studio Build Tools:"
+            Write-Host "  $installPath"
+            return $installPath
+        }
     }
 
-    $local = Join-Path $NinjaDir "ninja.exe"
-    if (Test-Path $local) {
-        Write-Host "Using bundled Ninja:"
-        Write-Host "  $local"
-        return $local
+    $winget = Find-CommandPath @("winget")
+    if (-not $winget) {
+        throw "Visual Studio Build Tools are required for the Vulkan build, but winget is not available."
     }
 
-    $downloadUrl = "https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-win.zip"
-    $zipPath = Join-Path $env:TEMP "whisper-drop-ninja.zip"
+    Write-Host "Installing Visual Studio Build Tools for Vulkan build..."
+    & $winget install -e --id Microsoft.VisualStudio.2022.BuildTools --accept-package-agreements --accept-source-agreements --override "--quiet --wait --norestart --nocache --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
 
-    Write-Host "Downloading Ninja..."
-    Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath
-
-    New-Item -ItemType Directory -Path $NinjaDir -Force | Out-Null
-    Expand-Archive -LiteralPath $zipPath -DestinationPath $NinjaDir -Force
-
-    if (-not (Test-Path $local)) {
-        throw "Ninja was not found after download."
+    if (Test-Path $vswhere) {
+        $installPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        if ($installPath) {
+            Write-Host "Using Visual Studio Build Tools:"
+            Write-Host "  $installPath"
+            return $installPath
+        }
     }
 
-    Write-Host "Using bundled Ninja:"
-    Write-Host "  $local"
-    return $local
+    throw "Visual Studio Build Tools were not found after installation."
+}
+
+function Find-VulkanSdkPath {
+    if ($env:VULKAN_SDK) {
+        $sdkPath = $env:VULKAN_SDK
+        if ((Test-Path (Join-Path $sdkPath "Include\vulkan\vulkan.h")) -and (Test-Path (Join-Path $sdkPath "Lib\vulkan-1.lib"))) {
+            return $sdkPath
+        }
+    }
+
+    $sdkRoot = "C:\VulkanSDK"
+    if (-not (Test-Path $sdkRoot)) {
+        return $null
+    }
+
+    $candidate = Get-ChildItem -Path $sdkRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1
+    if (-not $candidate) {
+        return $null
+    }
+
+    if ((Test-Path (Join-Path $candidate.FullName "Include\vulkan\vulkan.h")) -and (Test-Path (Join-Path $candidate.FullName "Lib\vulkan-1.lib"))) {
+        return $candidate.FullName
+    }
+
+    return $null
+}
+
+function Ensure-VulkanSdk {
+    $sdkPath = Find-VulkanSdkPath
+    if ($sdkPath) {
+        Write-Host "Using Vulkan SDK:"
+        Write-Host "  $sdkPath"
+        return $sdkPath
+    }
+
+    $winget = Find-CommandPath @("winget")
+    if (-not $winget) {
+        throw "The Vulkan SDK is required for the GPU-enabled Windows build, but winget is not available."
+    }
+
+    Write-Host "Installing Vulkan SDK..."
+    & $winget install -e --id KhronosGroup.VulkanSDK --accept-package-agreements --accept-source-agreements
+
+    $sdkPath = Find-VulkanSdkPath
+    if ($sdkPath) {
+        Write-Host "Using Vulkan SDK:"
+        Write-Host "  $sdkPath"
+        return $sdkPath
+    }
+
+    throw "The Vulkan SDK was not found after installation."
+}
+
+function Get-AvailableDriveLetter {
+    foreach ($letter in @("W", "X", "Y", "Z")) {
+        if (-not (Test-Path "${letter}:\")) {
+            return $letter
+        }
+    }
+
+    throw "Could not reserve a temporary drive letter for the whisper.cpp Vulkan build."
 }
 
 function Ensure-WhisperCpp {
@@ -235,44 +287,71 @@ function Ensure-WhisperCpp {
     }
 
     $localCandidates = @(
-        (Join-Path $WhisperRepoDir "Release\whisper-cli.exe"),
-        (Join-Path $WhisperRepoDir "Release\whisper-cpp.exe"),
         (Join-Path $WhisperRepoDir "build\bin\Release\whisper-cli.exe"),
         (Join-Path $WhisperRepoDir "build\bin\whisper-cli.exe"),
         (Join-Path $WhisperRepoDir "build\bin\Release\whisper-cpp.exe"),
         (Join-Path $WhisperRepoDir "build\bin\whisper-cpp.exe")
     )
+    $vulkanDllCandidates = @(
+        (Join-Path $WhisperRepoDir "build\bin\Release\ggml-vulkan.dll"),
+        (Join-Path $WhisperRepoDir "build\bin\ggml-vulkan.dll")
+    )
 
     foreach ($candidate in $localCandidates) {
-        if (Test-Path $candidate) {
+        if ((Test-Path $candidate) -and ($vulkanDllCandidates | Where-Object { Test-Path $_ })) {
             Write-Host "Using local whisper.cpp build:"
             Write-Host "  $candidate"
             return $candidate
         }
     }
 
-    $downloadUrl = "https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.4/whisper-bin-x64.zip"
-    $zipPath = Join-Path $env:TEMP "whisper-drop-whispercpp.zip"
+    $git = Ensure-WingetPackage -CommandName "git" -WingetId "Git.Git" -Label "Git"
+    $cmake = Ensure-WingetPackage -CommandName "cmake" -WingetId "Kitware.CMake" -Label "CMake"
+    $buildToolsPath = Ensure-BuildTools
+    $vulkanSdkPath = Ensure-VulkanSdk
 
-    Write-Host "Downloading whisper.cpp Windows binary..."
-    Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath
-
-    if (Test-Path $WhisperRepoDir) {
+    $hasSourceCheckout = (Test-Path (Join-Path $WhisperRepoDir "CMakeLists.txt")) -and (Test-Path (Join-Path $WhisperRepoDir ".git"))
+    if ((Test-Path $WhisperRepoDir) -and (-not $hasSourceCheckout)) {
+        Write-Host "Replacing existing whisper.cpp binaries with a source checkout for Vulkan build..."
         Remove-Item -LiteralPath $WhisperRepoDir -Recurse -Force
     }
 
-    New-Item -ItemType Directory -Path $WhisperRepoDir -Force | Out-Null
-    Expand-Archive -LiteralPath $zipPath -DestinationPath $WhisperRepoDir -Force
+    if (-not (Test-Path $WhisperRepoDir)) {
+        New-Item -ItemType Directory -Path $ToolsDir -Force | Out-Null
+        Write-Host "Cloning whisper.cpp..."
+        & $git clone https://github.com/ggml-org/whisper.cpp.git $WhisperRepoDir
+    } else {
+        Write-Host "Updating local whisper.cpp checkout..."
+        & $git -C $WhisperRepoDir fetch --tags --prune
+        & $git -C $WhisperRepoDir pull --ff-only
+    }
+
+    $buildDir = Join-Path $WhisperRepoDir "build"
+    if (Test-Path $buildDir) {
+        Remove-Item -LiteralPath $buildDir -Recurse -Force
+    }
+
+    $env:VULKAN_SDK = $vulkanSdkPath
+    Write-Host "Building whisper.cpp with Vulkan support..."
+    $driveLetter = Get-AvailableDriveLetter
+    $shortRoot = "${driveLetter}:"
+    & subst $shortRoot $WhisperRepoDir
+    try {
+        & $cmake -S "${shortRoot}\" -B "${shortRoot}\build" -G "Visual Studio 17 2022" -A x64 "-DGGML_VULKAN=ON"
+        & $cmake --build "${shortRoot}\build" --config Release
+    } finally {
+        & subst $shortRoot /d | Out-Null
+    }
 
     foreach ($candidate in $localCandidates) {
-        if (Test-Path $candidate) {
-            Write-Host "Using bundled whisper.cpp:"
+        if ((Test-Path $candidate) -and ($vulkanDllCandidates | Where-Object { Test-Path $_ })) {
+            Write-Host "Using local whisper.cpp Vulkan build:"
             Write-Host "  $candidate"
             return $candidate
         }
     }
 
-    throw "whisper.cpp was not found after download."
+    throw "whisper.cpp Vulkan build completed without the expected GPU binaries."
 }
 
 Write-Section "WhisperDrop - Windows Setup"

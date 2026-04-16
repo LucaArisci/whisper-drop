@@ -75,10 +75,11 @@ Or double-click `WhisperDrop_installer.bat`.
 This will automatically:
 - install Python 3.11 with `winget` if missing
 - download a local `ffmpeg` build if it is not already available
-- download the official `whisper.cpp` Windows binary inside `.tools/whisper.cpp`
+- install the Vulkan SDK and Visual Studio Build Tools if needed
+- build `whisper.cpp` locally with Vulkan GPU support inside `.tools/whisper.cpp`
 - install `tkinterdnd2` in a local `.venv`
 
-> **Note:** On Windows, the first setup can take a few minutes because the required binaries are downloaded locally on first run.
+> **Note:** On Windows, the first setup can take a while because `whisper.cpp` is built locally with Vulkan support. If Vulkan is not available on a given PC, the app will fall back to CPU automatically.
 
 ---
 
