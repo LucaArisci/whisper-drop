@@ -67,8 +67,15 @@ GREEN_DARK = "#1ea954"
 GREEN_SOFT = "#0d2014"
 RED = "#ff6b6b"
 RED_SOFT = "#2a0d0d"
-UI_FONT = ".AppleSystemUIFont" if os.name == "posix" and "darwin" in sys.platform else "Helvetica"
-MONO_FONT = "SF Mono" if os.name == "posix" and "darwin" in sys.platform else "Menlo"
+if sys.platform == "darwin":
+    UI_FONT = ".AppleSystemUIFont"
+    MONO_FONT = "SF Mono"
+elif os.name == "nt":
+    UI_FONT = "Segoe UI"
+    MONO_FONT = "Consolas"
+else:
+    UI_FONT = "Helvetica"
+    MONO_FONT = "Menlo"
 
 SCROLLBAR_WIDTH = 10
 THUMB_MIN_HEIGHT = 30
@@ -102,6 +109,9 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         self._build_ui()
         self._bind_shortcuts()
+
+    def _run_command(self, cmd):
+        return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
     def _build_ui(self):
         style = ttk.Style()
@@ -496,8 +506,10 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self.model_help_var.set(MODELS[self.model_var.get()]["description"])
 
     def _on_drop(self, event):
-        path = event.data.strip().strip("{}")
-        self._set_file(path)
+        entries = self.tk.splitlist(event.data)
+        if not entries:
+            return
+        self._set_file(entries[0])
 
     def _browse_file(self, event=None):
         path = filedialog.askopenfilename(
@@ -529,10 +541,27 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self.log.config(state="disabled")
 
     def _find_binary(self, names):
+        local_roots = []
+        if os.name == "nt":
+            local_roots.extend(
+                [
+                    self.app_dir / ".tools" / "ffmpeg" / "bin",
+                    self.app_dir / ".tools" / "whisper.cpp" / "Release",
+                    self.app_dir / ".tools" / "whisper.cpp" / "build" / "bin" / "Release",
+                    self.app_dir / ".tools" / "whisper.cpp" / "build" / "bin",
+                ]
+            )
+
         for name in names:
             resolved = shutil.which(name)
             if resolved:
                 return resolved
+
+        for root in local_roots:
+            for name in names:
+                candidate = root / f"{name}.exe"
+                if candidate.exists():
+                    return str(candidate)
 
         for prefix in (Path("/opt/homebrew/bin"), Path("/usr/local/bin")):
             for name in names:
@@ -604,7 +633,7 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         self._ui(self._set_status, "Preparing audio for whisper.cpp...", "neutral")
         self._ui(self._log, "Converting input to 16 kHz mono WAV...")
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = self._run_command(cmd)
         if result.returncode != 0:
             error_output = result.stderr.strip() or result.stdout.strip() or "Unknown ffmpeg error."
             raise RuntimeError(f"Audio conversion failed.\n{error_output}")
@@ -648,7 +677,7 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         self._ui(self._set_status, f"Transcribing with {model_name}...", "neutral")
         self._ui(self._log, f"Starting whisper.cpp with model '{model_name}'.")
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = self._run_command(cmd)
 
         if result.returncode != 0:
             error_output = result.stderr.strip() or result.stdout.strip() or "Unknown whisper.cpp error."
@@ -663,6 +692,17 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             self._ui(self._log, cli_output)
 
         return output_file
+
+    def _open_output_dir(self):
+        try:
+            if os.name == "nt":
+                os.startfile(self.output_dir)
+            elif sys.platform == "darwin":
+                subprocess.run(["open", self.output_dir], check=False)
+            else:
+                subprocess.run(["xdg-open", self.output_dir], check=False)
+        except Exception:
+            self._ui(self._log, "Transcript saved. Could not open the output folder automatically.")
 
     def _set_busy(self, busy):
         if busy:
@@ -704,7 +744,7 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
             self._ui(self._log, f"Saved: {output_file}")
             self._ui(self._set_status, "Done. Transcript saved next to the original file.", "success")
-            subprocess.run(["open", self.output_dir], check=False)
+            self._open_output_dir()
         except Exception as exc:
             self._ui(self._log, f"Error:\n{exc}")
             self._ui(self._set_status, "Transcription failed. Check the log.", "error")

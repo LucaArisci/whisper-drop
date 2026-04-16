@@ -1,6 +1,8 @@
 # whisper-drop
 
-A minimal macOS app to transcribe audio files with drag & drop, powered by whisper.cpp and quantized GGML models.
+![WhisperDrop UI](<Screenshot 2026-04-16 095610.png>)
+
+A minimal desktop app to transcribe audio files with drag & drop, powered by whisper.cpp and quantized GGML models.
 
 ![WhisperDrop screenshot](assets/screenshot.png)
 
@@ -20,12 +22,14 @@ A minimal macOS app to transcribe audio files with drag & drop, powered by whisp
 
 ## Requirements
 
-- macOS (Apple Silicon or Intel)
+- macOS or Windows
 - Internet connection for the first setup and first use of each model
 
 ---
 
 ## Installation
+
+### macOS
 
 Clone the repo:
 
@@ -42,7 +46,7 @@ Then run the installer:
 ./scripts/setup.sh
 ```
 
-Or double-click `scripts/WhisperDrop_installer.command` from Finder.
+Or double-click `WhisperDrop_installer.command` from Finder.
 
 This will automatically install:
 - [Homebrew](https://brew.sh)
@@ -53,20 +57,45 @@ This will automatically install:
 
 > **Note:** Setup takes a few minutes the first time.
 
+### Windows
+
+Clone the repo:
+
+```powershell
+git clone https://github.com/your-username/whisper-drop.git
+cd whisper-drop
+```
+
+Then run the installer:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1
+```
+
+Or double-click `WhisperDrop_installer.bat`.
+
+This will automatically:
+- install Python 3.11 with `winget` if missing
+- download a local `ffmpeg` build if it is not already available
+- download the official `whisper.cpp` Windows binary inside `.tools/whisper.cpp`
+- install `tkinterdnd2` in a local `.venv`
+
+> **Note:** On Windows, the first setup can take a few minutes because the required binaries are downloaded locally on first run.
+
 ---
 
 ## Usage
 
-Double-click `WhisperDrop.command` to open the app.
+Double-click `WhisperDrop.command` on macOS or `WhisperDrop.bat` on Windows to open the app.
 
-> **On first launch**, `WhisperDrop.command` will run setup automatically if it hasn't been done yet.
+> **On first launch**, the platform launcher will run setup automatically if it hasn't been done yet.
 
-> **Gatekeeper warning:** macOS may block `.command` files downloaded from the internet. If you see a *"Not Opened"* warning, click **Done**, then run this once in Terminal:
+> **Gatekeeper warning (macOS):** macOS may block `.command` files downloaded from the internet. If you see a *"Not Opened"* warning, click **Done**, then run this once in Terminal:
 >
 > ```bash
 > xattr -d com.apple.quarantine /path/to/WhisperDrop.command
 > xattr -d com.apple.quarantine /path/to/scripts/setup.sh
-> xattr -d com.apple.quarantine "/path/to/scripts/WhisperDrop_installer.command"
+> xattr -d com.apple.quarantine "/path/to/WhisperDrop_installer.command"
 > ```
 
 Once the app is open:
@@ -107,26 +136,32 @@ To run the app with hot reload while editing `transcriber.py`:
 .venv/bin/python scripts/dev.py
 ```
 
+On Windows, use the equivalent executables under `.venv\Scripts\`.
+
 Every time you save `transcriber.py` the app will restart automatically.
 
 ---
 
 ## Project structure
 
-```
+```text
 whisper-drop/
-├── scripts/
-│   ├── setup.sh                       # Full setup script
-│   └── dev.py                         # Hot-reload dev launcher
-├── transcriber.py                     # Main app
-├── WhisperDrop.command                # Launcher (double-click to open)
-├── WhisperDrop_installer.command  # Explicit installer
-├── requirements.txt                   # Python dependencies
-├── .gitignore
-├── LICENSE
-├── README.md
-├── .venv/                             # Local Python environment (created by setup)
-└── .models/whisper.cpp/               # Cached GGML models (created on first use)
+|-- scripts/
+|   |-- setup.sh                   # macOS setup script
+|   |-- setup.ps1                  # Windows setup script
+|   `-- dev.py                     # Hot-reload dev launcher
+|-- transcriber.py                 # Main app
+|-- WhisperDrop.command            # macOS launcher
+|-- WhisperDrop.bat                # Windows launcher
+|-- WhisperDrop_installer.command  # macOS installer
+|-- WhisperDrop_installer.bat      # Windows installer
+|-- requirements.txt               # Python dependencies
+|-- .gitignore
+|-- LICENSE
+|-- README.md
+|-- .venv/                         # Local Python environment (created by setup)
+|-- .tools/                        # Local Windows helper tools/builds (created by setup)
+`-- .models/whisper.cpp/           # Cached GGML models (created on first use)
 ```
 
 ---
