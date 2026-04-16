@@ -1,7 +1,5 @@
 # whisper-drop
 
-![WhisperDrop UI](<Screenshot 2026-04-16 095610.png>)
-
 A minimal desktop app to transcribe audio files with drag & drop, powered by whisper.cpp and quantized GGML models.
 
 ![WhisperDrop screenshot](assets/screenshot.png)
