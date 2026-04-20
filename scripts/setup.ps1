@@ -26,41 +26,81 @@ function Find-CommandPath {
         }
     }
 
-    $commonPaths = @{
-        "git" = @(
-            "C:\Program Files\Git\cmd\git.exe",
-            "C:\Program Files\Git\bin\git.exe"
-        )
-        "cmake" = @(
-            "C:\Program Files\CMake\bin\cmake.exe"
-        )
-        "python" = @(
-            "C:\Users\$env:USERNAME\AppData\Local\Programs\Python\Python311\python.exe",
-            "C:\Program Files\Python311\python.exe"
-        )
-        "python3" = @(
-            "C:\Users\$env:USERNAME\AppData\Local\Programs\Python\Python311\python.exe",
-            "C:\Program Files\Python311\python.exe"
-        )
-        "py" = @(
-            "C:\Windows\py.exe"
-        )
-        "winget" = @(
-            "C:\Users\$env:USERNAME\AppData\Local\Microsoft\WindowsApps\winget.exe"
-        )
+    foreach ($name in $Names) {
+        $whereMatches = @(& cmd.exe /d /c "where $name 2>nul")
+        foreach ($match in $whereMatches) {
+            if (Test-Path $match) {
+                return $match
+            }
+        }
     }
 
+    $appPathRoots = @(
+        "Registry::HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths",
+        "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths",
+        "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths"
+    )
+
     foreach ($name in $Names) {
-        if ($commonPaths.ContainsKey($name)) {
-            foreach ($candidate in $commonPaths[$name]) {
-                if (Test-Path $candidate) {
-                    return $candidate
+        $exeName = if ($name.ToLower().EndsWith(".exe")) { $name } else { "$name.exe" }
+        foreach ($root in $appPathRoots) {
+            $keyPath = Join-Path $root $exeName
+            if (Test-Path $keyPath) {
+                $resolved = (Get-Item $keyPath).GetValue("")
+                if ($resolved -and (Test-Path $resolved)) {
+                    return $resolved
                 }
             }
         }
     }
 
     return $null
+}
+
+function Get-RegisteredPythonPath {
+    $pythonRoots = @(
+        "Registry::HKEY_CURRENT_USER\SOFTWARE\Python\PythonCore",
+        "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Python\PythonCore",
+        "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Python\PythonCore"
+    )
+
+    $bestVersion = $null
+    $bestPath = $null
+
+    foreach ($root in $pythonRoots) {
+        if (-not (Test-Path $root)) {
+            continue
+        }
+
+        foreach ($versionKey in Get-ChildItem $root -ErrorAction SilentlyContinue) {
+            $version = $null
+            if (-not [version]::TryParse($versionKey.PSChildName, [ref]$version)) {
+                continue
+            }
+
+            if ($version -lt [version]"3.11") {
+                continue
+            }
+
+            $installKey = Join-Path $versionKey.PSPath "InstallPath"
+            if (-not (Test-Path $installKey)) {
+                continue
+            }
+
+            $installPath = (Get-Item $installKey).GetValue("")
+            if (-not $installPath) {
+                continue
+            }
+
+            $pythonExe = Join-Path $installPath "python.exe"
+            if ((Test-Path $pythonExe) -and (($bestVersion -eq $null) -or ($version -gt $bestVersion))) {
+                $bestVersion = $version
+                $bestPath = $pythonExe
+            }
+        }
+    }
+
+    return $bestPath
 }
 
 function Ensure-WingetPackage {
@@ -117,8 +157,19 @@ function Find-Python {
         }
     }
 
+    $registeredPython = Get-RegisteredPythonPath
+    if ($registeredPython) {
+        & $registeredPython -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)" 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            return @($registeredPython)
+        }
+    }
+
     Ensure-WingetPackage -CommandName "python" -WingetId "Python.Python.3.11" -Label "Python 3.11" | Out-Null
     $python = Find-CommandPath @("python")
+    if (-not $python) {
+        $python = Get-RegisteredPythonPath
+    }
     if (-not $python) {
         throw "Python 3.11 was not found after installation."
     }
@@ -225,18 +276,40 @@ function Find-VulkanSdkPath {
         }
     }
 
-    $sdkRoot = "C:\VulkanSDK"
-    if (-not (Test-Path $sdkRoot)) {
-        return $null
+    $registryLayerRoots = @(
+        "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Khronos\Vulkan\ExplicitLayers",
+        "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Khronos\Vulkan\ExplicitLayers",
+        "Registry::HKEY_CURRENT_USER\SOFTWARE\Khronos\Vulkan\ExplicitLayers"
+    )
+
+    $sdkCandidates = @()
+    foreach ($root in $registryLayerRoots) {
+        if (-not (Test-Path $root)) {
+            continue
+        }
+
+        $properties = Get-ItemProperty $root -ErrorAction SilentlyContinue
+        foreach ($property in $properties.PSObject.Properties) {
+            if ($property.Name -like "PS*") {
+                continue
+            }
+
+            $layerPath = $property.Name
+            if (-not (Test-Path $layerPath)) {
+                continue
+            }
+
+            $layerParent = Split-Path $layerPath -Parent
+            if ($layerParent) {
+                $sdkCandidates += (Split-Path $layerParent -Parent)
+            }
+        }
     }
 
-    $candidate = Get-ChildItem -Path $sdkRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1
-    if (-not $candidate) {
-        return $null
-    }
-
-    if ((Test-Path (Join-Path $candidate.FullName "Include\vulkan\vulkan.h")) -and (Test-Path (Join-Path $candidate.FullName "Lib\vulkan-1.lib"))) {
-        return $candidate.FullName
+    foreach ($candidate in ($sdkCandidates | Where-Object { $_ } | Sort-Object -Unique)) {
+        if ((Test-Path (Join-Path $candidate "Include\vulkan\vulkan.h")) -and (Test-Path (Join-Path $candidate "Lib\vulkan-1.lib"))) {
+            return $candidate
+        }
     }
 
     return $null
@@ -266,16 +339,6 @@ function Ensure-VulkanSdk {
     }
 
     throw "The Vulkan SDK was not found after installation."
-}
-
-function Get-AvailableDriveLetter {
-    foreach ($letter in @("W", "X", "Y", "Z")) {
-        if (-not (Test-Path "${letter}:\")) {
-            return $letter
-        }
-    }
-
-    throw "Could not reserve a temporary drive letter for the whisper.cpp Vulkan build."
 }
 
 function Get-LocalWhisperBinary {
@@ -320,10 +383,17 @@ function Invoke-WhisperCppBuild {
         [string]$VulkanSdkPath
     )
 
-    $buildDir = Join-Path $WhisperRepoDir "build"
-    if (Test-Path $buildDir) {
-        Remove-Item -LiteralPath $buildDir -Recurse -Force
+    $repoBuildDir = Join-Path $WhisperRepoDir "build"
+    if (Test-Path $repoBuildDir) {
+        Remove-Item -LiteralPath $repoBuildDir -Recurse -Force
     }
+
+    $buildFlavor = if ($EnableVulkan) { "vulkan" } else { "cpu" }
+    $buildRoot = Join-Path $env:TEMP "whisper-drop-build-$buildFlavor"
+    if (Test-Path $buildRoot) {
+        Remove-Item -LiteralPath $buildRoot -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $buildRoot -Force | Out-Null
 
     $previousVulkanSdk = $env:VULKAN_SDK
     if ($EnableVulkan -and $VulkanSdkPath) {
@@ -335,13 +405,10 @@ function Invoke-WhisperCppBuild {
     $buildModeLabel = if ($EnableVulkan) { "Vulkan support" } else { "CPU-only mode" }
     Write-Host "Building whisper.cpp with $buildModeLabel..."
 
-    $driveLetter = Get-AvailableDriveLetter
-    $shortRoot = "${driveLetter}:"
-    & subst $shortRoot $WhisperRepoDir
     try {
         $configureArgs = @(
-            "-S", "${shortRoot}\",
-            "-B", "${shortRoot}\build",
+            "-S", $WhisperRepoDir,
+            "-B", $buildRoot,
             "-G", "Visual Studio 17 2022",
             "-A", "x64",
             "-Wno-dev",
@@ -359,18 +426,25 @@ function Invoke-WhisperCppBuild {
             throw "CMake configure failed with exit code $LASTEXITCODE."
         }
 
-        & $CMakePath --build "${shortRoot}\build" --config Release
+        & $CMakePath --build $buildRoot --config Release
         if ($LASTEXITCODE -ne 0) {
             throw "CMake build failed with exit code $LASTEXITCODE."
         }
+
+        $builtBinDir = Join-Path $buildRoot "bin"
+        if (-not (Test-Path $builtBinDir)) {
+            throw "Build completed but the expected bin directory was not created."
+        }
+
+        $repoBinDir = Join-Path $repoBuildDir "bin"
+        New-Item -ItemType Directory -Path $repoBinDir -Force | Out-Null
+        Copy-Item -Path (Join-Path $builtBinDir "*") -Destination $repoBinDir -Recurse -Force
     } finally {
         if ([string]::IsNullOrWhiteSpace($previousVulkanSdk)) {
             Remove-Item Env:VULKAN_SDK -ErrorAction SilentlyContinue
         } else {
             $env:VULKAN_SDK = $previousVulkanSdk
         }
-
-        & subst $shortRoot /d | Out-Null
     }
 }
 

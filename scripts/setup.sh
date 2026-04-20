@@ -8,6 +8,51 @@ APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 VENV_DIR="$APP_DIR/.venv"
 REQ_FILE="$APP_DIR/requirements.txt"
 
+bootstrap_path() {
+  local login_shell=""
+  local login_path=""
+
+  if [ -x /usr/libexec/path_helper ]; then
+    eval "$(/usr/libexec/path_helper -s)"
+  fi
+
+  if [ -n "${SHELL:-}" ] && [ -x "${SHELL:-}" ]; then
+    login_shell="$SHELL"
+  elif command -v zsh >/dev/null 2>&1; then
+    login_shell="$(command -v zsh)"
+  elif command -v bash >/dev/null 2>&1; then
+    login_shell="$(command -v bash)"
+  fi
+
+  if [ -n "$login_shell" ]; then
+    login_path="$("$login_shell" -lc 'printf %s "$PATH"' 2>/dev/null || true)"
+    if [ -n "$login_path" ]; then
+      PATH="$login_path"
+      export PATH
+    fi
+  fi
+}
+
+resolve_brew_bin() {
+  local formula="$1"
+  local binary="$2"
+  local prefix=""
+
+  if ! command -v brew >/dev/null 2>&1; then
+    return 1
+  fi
+
+  prefix="$(brew --prefix "$formula" 2>/dev/null || true)"
+  if [ -n "$prefix" ] && [ -x "$prefix/bin/$binary" ]; then
+    echo "$prefix/bin/$binary"
+    return 0
+  fi
+
+  return 1
+}
+
+bootstrap_path
+
 echo ""
 echo "======================================"
 echo "  WhisperDrop - Setup"
@@ -17,16 +62,6 @@ echo ""
 find_brew() {
   if command -v brew >/dev/null 2>&1; then
     command -v brew
-    return 0
-  fi
-
-  if [ -x /opt/homebrew/bin/brew ]; then
-    echo /opt/homebrew/bin/brew
-    return 0
-  fi
-
-  if [ -x /usr/local/bin/brew ]; then
-    echo /usr/local/bin/brew
     return 0
   fi
 
@@ -41,6 +76,7 @@ install_homebrew() {
 BREW_BIN="$(find_brew || true)"
 if [ -z "$BREW_BIN" ]; then
   install_homebrew
+  bootstrap_path
   BREW_BIN="$(find_brew)"
 fi
 
@@ -53,15 +89,7 @@ find_ffmpeg() {
     return 0
   fi
 
-  if [ -x /opt/homebrew/bin/ffmpeg ]; then
-    echo /opt/homebrew/bin/ffmpeg
-    return 0
-  fi
-
-  if [ -x /usr/local/bin/ffmpeg ]; then
-    echo /usr/local/bin/ffmpeg
-    return 0
-  fi
+  resolve_brew_bin ffmpeg ffmpeg && return 0
 
   return 1
 }
@@ -94,25 +122,8 @@ find_whisper_cpp() {
     return 0
   fi
 
-  if [ -x /opt/homebrew/bin/whisper-cli ]; then
-    echo /opt/homebrew/bin/whisper-cli
-    return 0
-  fi
-
-  if [ -x /usr/local/bin/whisper-cli ]; then
-    echo /usr/local/bin/whisper-cli
-    return 0
-  fi
-
-  if [ -x /opt/homebrew/bin/whisper-cpp ]; then
-    echo /opt/homebrew/bin/whisper-cpp
-    return 0
-  fi
-
-  if [ -x /usr/local/bin/whisper-cpp ]; then
-    echo /usr/local/bin/whisper-cpp
-    return 0
-  fi
+  resolve_brew_bin whisper-cpp whisper-cli && return 0
+  resolve_brew_bin whisper-cpp whisper-cpp && return 0
 
   return 1
 }
@@ -138,12 +149,14 @@ if command -v python3.11 >/dev/null 2>&1; then
 fi
 
 if [ -z "$PYTHON_BIN" ]; then
+  PYTHON_BIN="$(resolve_brew_bin python@3.11 python3.11 || true)"
+fi
+
+if [ -z "$PYTHON_BIN" ]; then
   echo "Installing Python 3.11..."
   "$BREW_BIN" install python@3.11
-  BREW_PREFIX="$("$BREW_BIN" --prefix)"
-  if [ -x "$BREW_PREFIX/bin/python3.11" ]; then
-    PYTHON_BIN="$BREW_PREFIX/bin/python3.11"
-  fi
+  bootstrap_path
+  PYTHON_BIN="$(resolve_brew_bin python@3.11 python3.11 || true)"
 fi
 
 if [ -z "$PYTHON_BIN" ]; then

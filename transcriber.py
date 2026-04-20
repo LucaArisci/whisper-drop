@@ -88,6 +88,7 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         super().__init__()
         self.title("WhisperDrop")
         self.configure(bg=BG)
+        self.resizable(True, True)
 
         self.app_dir = Path(__file__).resolve().parent
         self.model_dir = self.app_dir / ".models" / "whisper.cpp"
@@ -129,13 +130,15 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
     def _configure_window_size(self):
         work_w, work_h = self._get_work_area()
         if os.name == "nt":
-            target_w = min(work_w - 16, max(1080, work_w - 40))
-            target_h = min(work_h - 16, max(840, work_h - 32))
+            target_w = min(1280, max(980, work_w - 120))
+            target_h = min(900, max(760, work_h - 120))
         else:
             target_w = min(1280, max(960, work_w - 48))
             target_h = min(920, max(720, work_h - 36))
         min_w = min(960, max(820, work_w - 80))
         min_h = min(700, max(620, work_h - 80))
+        self._base_min_width = min_w
+        self._base_min_height = min_h
         pos_x = max(20, (work_w - target_w) // 2)
         pos_y = max(20, (work_h - target_h) // 2)
 
@@ -152,8 +155,8 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         required_h = self.winfo_reqheight()
 
         if os.name == "nt":
-            target_w = min(work_w - 12, max(current_w, required_w + 24))
-            target_h = min(work_h - 12, max(current_h, required_h + 120))
+            target_w = min(work_w - 40, max(self._base_min_width, required_w + 24))
+            target_h = min(work_h - 40, max(self._base_min_height, required_h + 48))
         else:
             target_w = min(work_w - 24, max(current_w, required_w))
             target_h = min(work_h - 24, max(current_h, required_h))
@@ -161,7 +164,7 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         pos_y = max(12, (work_h - target_h) // 2)
 
         self.geometry(f"{target_w}x{target_h}+{pos_x}+{pos_y}")
-        self.minsize(min(self.winfo_width(), target_w), min(self.winfo_height(), target_h))
+        self.minsize(self._base_min_width, self._base_min_height)
 
     def _build_ui(self):
         style = ttk.Style()
@@ -630,6 +633,31 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self.log.see("end")
         self.log.config(state="disabled")
 
+    def _get_shell_path_entries(self):
+        if sys.platform != "darwin":
+            return []
+
+        shell = os.environ.get("SHELL") or shutil.which("zsh") or shutil.which("bash")
+        if not shell:
+            return []
+
+        try:
+            result = subprocess.run(
+                [shell, "-lc", 'printf %s "$PATH"'],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+        except OSError:
+            return []
+
+        if result.returncode != 0 or not result.stdout:
+            return []
+
+        return [entry for entry in result.stdout.split(os.pathsep) if entry]
+
     def _find_binary(self, names):
         local_roots = []
         if os.name == "nt":
@@ -642,6 +670,18 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
                 ]
             )
 
+        search_roots = []
+        seen_roots = set()
+        for raw_path in self._get_shell_path_entries() + os.environ.get("PATH", "").split(os.pathsep):
+            if not raw_path:
+                continue
+            path_obj = Path(raw_path).expanduser()
+            normalized = str(path_obj)
+            if normalized in seen_roots or not path_obj.exists():
+                continue
+            seen_roots.add(normalized)
+            search_roots.append(path_obj)
+
         for name in names:
             resolved = shutil.which(name)
             if resolved:
@@ -653,9 +693,9 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
                 if candidate.exists():
                     return str(candidate)
 
-        for prefix in (Path("/opt/homebrew/bin"), Path("/usr/local/bin")):
+        for prefix in search_roots:
             for name in names:
-                candidate = prefix / name
+                candidate = prefix / (f"{name}.exe" if os.name == "nt" else name)
                 if candidate.exists():
                     return str(candidate)
 
