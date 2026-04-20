@@ -1,6 +1,6 @@
 # whisper-drop
 
-A minimal desktop app to transcribe audio files with drag & drop, powered by whisper.cpp and quantized GGML models.
+A minimal desktop app to transcribe one or more audio files with drag & drop, powered by whisper.cpp and quantized GGML models.
 
 ![WhisperDrop screenshot](assets/screenshot.png)
 
@@ -8,12 +8,12 @@ A minimal desktop app to transcribe audio files with drag & drop, powered by whi
 
 ## Features
 
-- Drag & drop any audio or video file onto the window
+- Drag & drop one or more audio or video files onto the window
 - Supports `.mp3`, `.wav`, `.m4a`, `.ogg`, `.flac`, `.opus`, `.webm`, `.mp4`, `.aac`
 - Quantized GGML models (Q5/Q8) for lower resource usage on CPU
 - Models are downloaded automatically on first use and cached locally
 - Two-column layout with live log panel
-- Outputs a `.txt` file saved next to the original audio
+- Outputs one `.txt` file per source item, saved next to the original audio
 - No technical knowledge required to use
 
 ---
@@ -99,10 +99,10 @@ Double-click `WhisperDrop.command` on macOS or `WhisperDrop.bat` on Windows to o
 
 Once the app is open:
 
-1. Drag & drop an audio file onto the window (or click to browse)
+1. Drag & drop one or more audio files onto the window (or click to browse)
 2. Select the language and model
 3. Click **Start Transcription**
-4. The `.txt` file is saved in the same folder as the original audio
+4. A `.txt` file is saved next to each original audio file
 
 ---
 

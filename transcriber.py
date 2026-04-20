@@ -91,8 +91,7 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         self.app_dir = Path(__file__).resolve().parent
         self.model_dir = self.app_dir / ".models" / "whisper.cpp"
-        self.file_path = None
-        self.output_dir = None
+        self.file_paths = []
 
         self._scroll_top = 0.0
         self._scroll_bottom = 1.0
@@ -100,8 +99,8 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self._scroll_drag_start_top = None
 
         default_model = "Turbo Q5"
-        self.file_var = tk.StringVar(value="No file selected")
-        self.file_help_var = tk.StringVar(value="Choose an audio or video file to create a text transcript.")
+        self.file_var = tk.StringVar(value="No files selected")
+        self.file_help_var = tk.StringVar(value="Choose one or more audio or video files to create text transcripts.")
         self.status_var = tk.StringVar(value="Ready")
         self.lang_var = tk.StringVar(value="Italian")
         self.model_var = tk.StringVar(value=default_model)
@@ -109,6 +108,9 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         self._configure_window_size()
         self._build_ui()
+        self._fit_window_to_content()
+        self.after(75, self._fit_window_to_content)
+        self.after(250, self._fit_window_to_content)
         self._bind_shortcuts()
 
     def _run_command(self, cmd):
@@ -126,8 +128,12 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
     def _configure_window_size(self):
         work_w, work_h = self._get_work_area()
-        target_w = min(1280, max(960, work_w - 48))
-        target_h = min(920, max(720, work_h - 36))
+        if os.name == "nt":
+            target_w = min(work_w - 16, max(1080, work_w - 40))
+            target_h = min(work_h - 16, max(840, work_h - 32))
+        else:
+            target_w = min(1280, max(960, work_w - 48))
+            target_h = min(920, max(720, work_h - 36))
         min_w = min(960, max(820, work_w - 80))
         min_h = min(700, max(620, work_h - 80))
         pos_x = max(20, (work_w - target_w) // 2)
@@ -135,6 +141,27 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         self.geometry(f"{target_w}x{target_h}+{pos_x}+{pos_y}")
         self.minsize(min_w, min_h)
+
+    def _fit_window_to_content(self):
+        self.update_idletasks()
+
+        work_w, work_h = self._get_work_area()
+        current_w = self.winfo_width()
+        current_h = self.winfo_height()
+        required_w = self.winfo_reqwidth()
+        required_h = self.winfo_reqheight()
+
+        if os.name == "nt":
+            target_w = min(work_w - 12, max(current_w, required_w + 24))
+            target_h = min(work_h - 12, max(current_h, required_h + 120))
+        else:
+            target_w = min(work_w - 24, max(current_w, required_w))
+            target_h = min(work_h - 24, max(current_h, required_h))
+        pos_x = max(12, (work_w - target_w) // 2)
+        pos_y = max(12, (work_h - target_h) // 2)
+
+        self.geometry(f"{target_w}x{target_h}+{pos_x}+{pos_y}")
+        self.minsize(min(self.winfo_width(), target_w), min(self.winfo_height(), target_h))
 
     def _build_ui(self):
         style = ttk.Style()
@@ -231,7 +258,7 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         self.drop_title = tk.Label(
             self.drop_zone,
-            text="Drop file here ➕",
+            text="Drop files here ➕",
             font=(UI_FONT, 20, "bold"),
             bg=BG,
             fg=TEXT,
@@ -246,6 +273,12 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             fg=MUTED,
         )
         self.drop_subtitle.grid(row=1, column=0, sticky="n", pady=(0, 26))
+        self.drop_title.bind("<Button-1>", self._browse_file)
+        self.drop_subtitle.bind("<Button-1>", self._browse_file)
+        self.drop_title.bind("<Enter>", lambda _e: self._set_drop_zone_hover(True))
+        self.drop_subtitle.bind("<Enter>", lambda _e: self._set_drop_zone_hover(True))
+        self.drop_title.bind("<Leave>", lambda _e: self._set_drop_zone_hover(False))
+        self.drop_subtitle.bind("<Leave>", lambda _e: self._set_drop_zone_hover(False))
 
         if HAS_DND:
             self.drop_zone.drop_target_register(DND_FILES)
@@ -266,7 +299,7 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         self.browse_btn = tk.Label(
             self.browse_btn_frame,
-            text="Browse File  📂",
+            text="Browse Files  📂",
             font=(UI_FONT, 13, "bold"),
             bg=GREEN_SOFT,
             fg=GREEN,
@@ -532,30 +565,64 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         entries = self.tk.splitlist(event.data)
         if not entries:
             return
-        self._set_file(entries[0])
+        self._set_files(entries)
 
     def _browse_file(self, event=None):
-        path = filedialog.askopenfilename(
-            title="Select audio or video file",
+        paths = filedialog.askopenfilenames(
+            title="Select audio or video files",
             filetypes=[("Audio and video", "*.mp3 *.wav *.m4a *.ogg *.flac *.opus *.webm *.mp4 *.aac")],
         )
-        if path:
-            self._set_file(path)
+        if paths:
+            self._set_files(paths)
 
-    def _set_file(self, path):
-        file_path = Path(path)
-        ext = file_path.suffix.lower()
-        if ext not in SUPPORTED:
-            messagebox.showerror("Unsupported file", f"Supported formats: {', '.join(sorted(SUPPORTED))}")
+    def _set_files(self, paths):
+        valid_files = []
+        invalid_files = []
+        seen = set()
+
+        for path in paths:
+            file_path = Path(path)
+            ext = file_path.suffix.lower()
+            resolved = str(file_path)
+
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+
+            if ext not in SUPPORTED or not file_path.is_file():
+                invalid_files.append(file_path.name or resolved)
+                continue
+
+            valid_files.append(resolved)
+
+        if not valid_files:
+            messagebox.showerror("Unsupported files", f"Supported formats: {', '.join(sorted(SUPPORTED))}")
             return
 
-        self.file_path = str(file_path)
-        self.output_dir = str(file_path.parent)
-        self.file_var.set(file_path.name)
-        self.file_help_var.set("Ready to transcribe with whisper.cpp. The text file will be saved next to the original file.")
+        self.file_paths = valid_files
+        if len(valid_files) == 1:
+            file_name = Path(valid_files[0]).name
+            self.file_var.set(file_name)
+            self.file_help_var.set("Ready to transcribe with whisper.cpp. The text file will be saved next to the original file.")
+            self._set_status("1 file selected. Ready to transcribe.", "success")
+        else:
+            preview_names = [Path(path).name for path in valid_files[:3]]
+            preview = ", ".join(preview_names)
+            if len(valid_files) > 3:
+                preview += f", +{len(valid_files) - 3} more"
+            self.file_var.set(f"{len(valid_files)} files selected")
+            self.file_help_var.set(f"Ready to transcribe {len(valid_files)} files. Queue: {preview}")
+            self._set_status(f"{len(valid_files)} files selected. Ready to transcribe.", "success")
+
         self.file_help_label.config(fg=GREEN)
-        self._set_status("File selected. Ready to transcribe.", "success")
-        self._log(f"Loaded: {file_path.name}")
+        self._log(f"Loaded {len(valid_files)} file(s).")
+        for path in valid_files:
+            self._log(f"  - {Path(path).name}")
+
+        if invalid_files:
+            self._log("Skipped unsupported entries:")
+            for name in invalid_files:
+                self._log(f"  - {name}")
 
     def _log(self, message):
         self.log.config(state="normal")
@@ -670,8 +737,8 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         return wav_path
 
-    def _next_output_base(self):
-        original_base = Path(self.output_dir) / Path(self.file_path).stem
+    def _next_output_base(self, source_path):
+        original_base = source_path.parent / source_path.stem
         if not original_base.with_suffix(".txt").exists():
             return original_base
 
@@ -683,12 +750,12 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
                 return candidate
             counter += 1
 
-    def _run_whisper_cpp(self, audio_path, model_name, model_path, language):
+    def _run_whisper_cpp(self, source_path, audio_path, model_name, model_path, language):
         whisper_cpp = self._find_binary(("whisper-cli", "whisper-cpp"))
         if not whisper_cpp:
             raise RuntimeError("whisper.cpp was not found. Run setup again to install it.")
 
-        output_base = self._next_output_base()
+        output_base = self._next_output_base(source_path)
         threads = max(1, min(8, os.cpu_count() or 4))
         backend = self._detect_whisper_backend(whisper_cpp)
         cmd = [
@@ -743,14 +810,21 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         return output_file
 
-    def _open_output_dir(self):
+    def _open_output_dirs(self, output_dirs):
+        unique_dirs = sorted({str(Path(path)) for path in output_dirs})
+        if len(unique_dirs) != 1:
+            if len(unique_dirs) > 1:
+                self._ui(self._log, f"Transcripts saved across {len(unique_dirs)} folders.")
+            return
+
         try:
+            output_dir = unique_dirs[0]
             if os.name == "nt":
-                os.startfile(self.output_dir)
+                os.startfile(output_dir)
             elif sys.platform == "darwin":
-                subprocess.run(["open", self.output_dir], check=False)
+                subprocess.run(["open", output_dir], check=False)
             else:
-                subprocess.run(["xdg-open", self.output_dir], check=False)
+                subprocess.run(["xdg-open", output_dir], check=False)
         except Exception:
             self._ui(self._log, "Transcript saved. Could not open the output folder automatically.")
 
@@ -774,8 +848,8 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             self.progress.grid_forget()
 
     def _run_transcription(self):
-        if not self.file_path:
-            messagebox.showwarning("No file", "Please select a file first.")
+        if not self.file_paths:
+            messagebox.showwarning("No files", "Please select at least one file first.")
             return
 
         self._set_busy(True)
@@ -787,14 +861,47 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             model_name = self.model_var.get()
             model_info = MODELS[model_name]
             model_path = self._download_model(model_name, model_info)
+            selected_files = [Path(path) for path in self.file_paths]
+            saved_outputs = []
+            failed_files = []
 
-            with tempfile.TemporaryDirectory(prefix="transcriber-") as temp_dir:
-                audio_path = self._prepare_audio(self.file_path, temp_dir)
-                output_file = self._run_whisper_cpp(audio_path, model_name, model_path, language)
+            for index, source_path in enumerate(selected_files, start=1):
+                self._ui(self._log, "")
+                self._ui(self._log, f"[{index}/{len(selected_files)}] Processing: {source_path.name}")
+                try:
+                    with tempfile.TemporaryDirectory(prefix="transcriber-") as temp_dir:
+                        audio_path = self._prepare_audio(source_path, temp_dir)
+                        output_file = self._run_whisper_cpp(source_path, audio_path, model_name, model_path, language)
+                    saved_outputs.append(output_file)
+                    self._ui(self._log, f"Saved: {output_file}")
+                except Exception as exc:
+                    failed_files.append((source_path, str(exc)))
+                    self._ui(self._log, f"Error while processing {source_path.name}:\n{exc}")
 
-            self._ui(self._log, f"Saved: {output_file}")
-            self._ui(self._set_status, "Done. Transcript saved next to the original file.", "success")
-            self._open_output_dir()
+            if saved_outputs:
+                self._open_output_dirs([output.parent for output in saved_outputs])
+
+            if failed_files:
+                self._ui(self._log, "")
+                self._ui(self._log, "Some files could not be transcribed:")
+                for source_path, error_text in failed_files:
+                    summary = error_text.splitlines()[0] if error_text else "Unknown error."
+                    self._ui(self._log, f"  - {source_path.name}: {summary}")
+
+                if saved_outputs:
+                    self._ui(
+                        self._set_status,
+                        f"Completed with errors. Saved {len(saved_outputs)} transcript(s), failed {len(failed_files)}.",
+                        "error",
+                    )
+                else:
+                    self._ui(self._set_status, "Transcription failed for all selected files. Check the log.", "error")
+            else:
+                self._ui(
+                    self._set_status,
+                    f"Done. Saved {len(saved_outputs)} transcript(s) next to the original file(s).",
+                    "success",
+                )
         except Exception as exc:
             self._ui(self._log, f"Error:\n{exc}")
             self._ui(self._set_status, "Transcription failed. Check the log.", "error")

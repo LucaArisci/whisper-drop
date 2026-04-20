@@ -278,13 +278,10 @@ function Get-AvailableDriveLetter {
     throw "Could not reserve a temporary drive letter for the whisper.cpp Vulkan build."
 }
 
-function Ensure-WhisperCpp {
-    $existing = Find-CommandPath @("whisper-cli", "whisper-cpp")
-    if ($existing) {
-        Write-Host "Using whisper.cpp:"
-        Write-Host "  $existing"
-        return $existing
-    }
+function Get-LocalWhisperBinary {
+    param(
+        [switch]$RequireVulkan
+    )
 
     $localCandidates = @(
         (Join-Path $WhisperRepoDir "build\bin\Release\whisper-cli.exe"),
@@ -296,19 +293,117 @@ function Ensure-WhisperCpp {
         (Join-Path $WhisperRepoDir "build\bin\Release\ggml-vulkan.dll"),
         (Join-Path $WhisperRepoDir "build\bin\ggml-vulkan.dll")
     )
+    $hasVulkan = [bool]($vulkanDllCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1)
 
     foreach ($candidate in $localCandidates) {
-        if ((Test-Path $candidate) -and ($vulkanDllCandidates | Where-Object { Test-Path $_ })) {
-            Write-Host "Using local whisper.cpp build:"
-            Write-Host "  $candidate"
-            return $candidate
+        if (-not (Test-Path $candidate)) {
+            continue
         }
+
+        if ($RequireVulkan -and (-not $hasVulkan)) {
+            continue
+        }
+
+        return [PSCustomObject]@{
+            Path = $candidate
+            HasVulkan = $hasVulkan
+        }
+    }
+
+    return $null
+}
+
+function Invoke-WhisperCppBuild {
+    param(
+        [string]$CMakePath,
+        [bool]$EnableVulkan,
+        [string]$VulkanSdkPath
+    )
+
+    $buildDir = Join-Path $WhisperRepoDir "build"
+    if (Test-Path $buildDir) {
+        Remove-Item -LiteralPath $buildDir -Recurse -Force
+    }
+
+    $previousVulkanSdk = $env:VULKAN_SDK
+    if ($EnableVulkan -and $VulkanSdkPath) {
+        $env:VULKAN_SDK = $VulkanSdkPath
+    } else {
+        Remove-Item Env:VULKAN_SDK -ErrorAction SilentlyContinue
+    }
+
+    $buildModeLabel = if ($EnableVulkan) { "Vulkan support" } else { "CPU-only mode" }
+    Write-Host "Building whisper.cpp with $buildModeLabel..."
+
+    $driveLetter = Get-AvailableDriveLetter
+    $shortRoot = "${driveLetter}:"
+    & subst $shortRoot $WhisperRepoDir
+    try {
+        $configureArgs = @(
+            "-S", "${shortRoot}\",
+            "-B", "${shortRoot}\build",
+            "-G", "Visual Studio 17 2022",
+            "-A", "x64",
+            "-Wno-dev",
+            "-Wno-deprecated"
+        )
+
+        if ($EnableVulkan) {
+            $configureArgs += "-DGGML_VULKAN=ON"
+        } else {
+            $configureArgs += "-DGGML_VULKAN=OFF"
+        }
+
+        & $CMakePath @configureArgs
+        if ($LASTEXITCODE -ne 0) {
+            throw "CMake configure failed with exit code $LASTEXITCODE."
+        }
+
+        & $CMakePath --build "${shortRoot}\build" --config Release
+        if ($LASTEXITCODE -ne 0) {
+            throw "CMake build failed with exit code $LASTEXITCODE."
+        }
+    } finally {
+        if ([string]::IsNullOrWhiteSpace($previousVulkanSdk)) {
+            Remove-Item Env:VULKAN_SDK -ErrorAction SilentlyContinue
+        } else {
+            $env:VULKAN_SDK = $previousVulkanSdk
+        }
+
+        & subst $shortRoot /d | Out-Null
+    }
+}
+
+function Ensure-WhisperCpp {
+    $existing = Find-CommandPath @("whisper-cli", "whisper-cpp")
+    if ($existing) {
+        Write-Host "Using whisper.cpp:"
+        Write-Host "  $existing"
+        return $existing
+    }
+
+    $localBuild = Get-LocalWhisperBinary
+    if ($localBuild) {
+        if ($localBuild.HasVulkan) {
+            Write-Host "Using local whisper.cpp Vulkan build:"
+        } else {
+            Write-Host "Using local whisper.cpp CPU build:"
+        }
+        Write-Host "  $($localBuild.Path)"
+        return $localBuild.Path
     }
 
     $git = Ensure-WingetPackage -CommandName "git" -WingetId "Git.Git" -Label "Git"
     $cmake = Ensure-WingetPackage -CommandName "cmake" -WingetId "Kitware.CMake" -Label "CMake"
     $buildToolsPath = Ensure-BuildTools
-    $vulkanSdkPath = Ensure-VulkanSdk
+    $vulkanSdkPath = $null
+
+    try {
+        $vulkanSdkPath = Ensure-VulkanSdk
+    } catch {
+        Write-Host "Vulkan SDK not available. Falling back to CPU-only whisper.cpp build."
+        Write-Host "  $($_.Exception.Message)"
+    }
 
     $hasSourceCheckout = (Test-Path (Join-Path $WhisperRepoDir "CMakeLists.txt")) -and (Test-Path (Join-Path $WhisperRepoDir ".git"))
     if ((Test-Path $WhisperRepoDir) -and (-not $hasSourceCheckout)) {
@@ -326,32 +421,33 @@ function Ensure-WhisperCpp {
         & $git -C $WhisperRepoDir pull --ff-only
     }
 
-    $buildDir = Join-Path $WhisperRepoDir "build"
-    if (Test-Path $buildDir) {
-        Remove-Item -LiteralPath $buildDir -Recurse -Force
-    }
-
-    $env:VULKAN_SDK = $vulkanSdkPath
-    Write-Host "Building whisper.cpp with Vulkan support..."
-    $driveLetter = Get-AvailableDriveLetter
-    $shortRoot = "${driveLetter}:"
-    & subst $shortRoot $WhisperRepoDir
-    try {
-        & $cmake -S "${shortRoot}\" -B "${shortRoot}\build" -G "Visual Studio 17 2022" -A x64 "-DGGML_VULKAN=ON"
-        & $cmake --build "${shortRoot}\build" --config Release
-    } finally {
-        & subst $shortRoot /d | Out-Null
-    }
-
-    foreach ($candidate in $localCandidates) {
-        if ((Test-Path $candidate) -and ($vulkanDllCandidates | Where-Object { Test-Path $_ })) {
-            Write-Host "Using local whisper.cpp Vulkan build:"
-            Write-Host "  $candidate"
-            return $candidate
+    $builtWithVulkan = $false
+    if ($vulkanSdkPath) {
+        try {
+            Invoke-WhisperCppBuild -CMakePath $cmake -EnableVulkan $true -VulkanSdkPath $vulkanSdkPath
+            $builtWithVulkan = $true
+        } catch {
+            Write-Host "Vulkan build failed. Falling back to CPU-only whisper.cpp build."
+            Write-Host "  $($_.Exception.Message)"
         }
     }
 
-    throw "whisper.cpp Vulkan build completed without the expected GPU binaries."
+    if (-not $builtWithVulkan) {
+        Invoke-WhisperCppBuild -CMakePath $cmake -EnableVulkan $false -VulkanSdkPath $null
+    }
+
+    $localBuild = Get-LocalWhisperBinary
+    if ($localBuild) {
+        if ($localBuild.HasVulkan) {
+            Write-Host "Using local whisper.cpp Vulkan build:"
+        } else {
+            Write-Host "Using local whisper.cpp CPU build:"
+        }
+        Write-Host "  $($localBuild.Path)"
+        return $localBuild.Path
+    }
+
+    throw "whisper.cpp build completed without producing a usable whisper executable."
 }
 
 Write-Section "WhisperDrop - Windows Setup"
