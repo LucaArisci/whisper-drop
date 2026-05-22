@@ -1,5 +1,7 @@
 import ctypes
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -8,9 +10,12 @@ import threading
 import tkinter as tk
 import urllib.error
 import urllib.request
-from ctypes import wintypes
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from urllib.parse import urlparse
+
+if os.name == "nt":
+    from ctypes import wintypes
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -81,6 +86,10 @@ else:
 
 SCROLLBAR_WIDTH = 10
 THUMB_MIN_HEIGHT = 30
+YOUTUBE_URL_PATTERN = re.compile(
+    r"^https?://(?:www\.|music\.)?(?:youtube\.com/(?:watch\?[^#]*?v=|playlist\?|shorts/)|youtu\.be/)[^\s]+$",
+    re.IGNORECASE,
+)
 
 
 class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
@@ -90,9 +99,18 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self.configure(bg=BG)
         self.resizable(True, True)
 
-        self.app_dir = Path(__file__).resolve().parent
-        self.model_dir = self.app_dir / ".models" / "whisper.cpp"
+        source_dir = Path(__file__).resolve().parent
+        configured_app_dir = os.environ.get("WHISPERDROP_APP_DIR")
+        configured_runtime_dir = os.environ.get("WHISPERDROP_RUNTIME_DIR")
+        self.app_dir = Path(configured_app_dir).expanduser().resolve() if configured_app_dir else source_dir
+        self.runtime_dir = (
+            Path(configured_runtime_dir).expanduser().resolve() if configured_runtime_dir else self.app_dir
+        )
+        self.model_dir = self.runtime_dir / ".models" / "whisper.cpp"
+        self.download_dir = Path.home() / "Downloads" / "WhisperDrop"
         self.file_paths = []
+        self.youtube_entries = []
+        self.youtube_playlist_title = ""
 
         self._scroll_top = 0.0
         self._scroll_bottom = 1.0
@@ -106,6 +124,10 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self.lang_var = tk.StringVar(value="Italian")
         self.model_var = tk.StringVar(value=default_model)
         self.model_help_var = tk.StringVar(value=MODELS[default_model]["description"])
+        self.youtube_url_var = tk.StringVar(value="")
+        self.youtube_help_var = tk.StringVar(
+            value="Paste a YouTube playlist or video link, then load it into the queue."
+        )
 
         self._configure_window_size()
         self._build_ui()
@@ -341,6 +363,77 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         )
         self.file_help_label.grid(row=1, column=0, sticky="ew", pady=(4, 0))
 
+        youtube_section = tk.Frame(file_card, bg=CARD)
+        youtube_section.grid(row=4, column=0, sticky="ew", padx=18, pady=(0, 18))
+        youtube_section.grid_columnconfigure(0, weight=1)
+
+        tk.Label(
+            youtube_section,
+            text="YouTube Playlist",
+            font=(UI_FONT, 15, "bold"),
+            bg=CARD,
+            fg=TEXT,
+        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+
+        self.youtube_entry = tk.Entry(
+            youtube_section,
+            textvariable=self.youtube_url_var,
+            font=(UI_FONT, 12),
+            bg=BG,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief="flat",
+            highlightbackground=BORDER,
+            highlightthickness=1,
+        )
+        self.youtube_entry.grid(row=1, column=0, sticky="ew", ipady=8)
+
+        youtube_btn_row = tk.Frame(youtube_section, bg=CARD)
+        youtube_btn_row.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+
+        self.youtube_btn_frame = tk.Frame(
+            youtube_btn_row,
+            bg=GREEN_SOFT,
+            highlightbackground=GREEN,
+            highlightthickness=1,
+            cursor="hand2",
+        )
+        self.youtube_btn_frame.pack(side="left")
+
+        self.youtube_btn = tk.Label(
+            self.youtube_btn_frame,
+            text="Load Playlist  ▶️",
+            font=(UI_FONT, 13, "bold"),
+            bg=GREEN_SOFT,
+            fg=GREEN,
+            padx=18,
+            pady=12,
+            cursor="hand2",
+        )
+        self.youtube_btn.pack()
+        self.youtube_btn.bind("<Button-1>", lambda _e: self._load_youtube_playlist())
+        self.youtube_btn_frame.bind("<Button-1>", lambda _e: self._load_youtube_playlist())
+        self.youtube_btn.bind(
+            "<Enter>",
+            lambda _e: (self.youtube_btn_frame.config(bg="#0f2e1a"), self.youtube_btn.config(bg="#0f2e1a")),
+        )
+        self.youtube_btn.bind(
+            "<Leave>",
+            lambda _e: (self.youtube_btn_frame.config(bg=GREEN_SOFT), self.youtube_btn.config(bg=GREEN_SOFT)),
+        )
+
+        self.youtube_help_label = tk.Label(
+            youtube_section,
+            textvariable=self.youtube_help_var,
+            font=(UI_FONT, 11),
+            bg=CARD,
+            fg=MUTED,
+            anchor="w",
+            justify="left",
+            wraplength=420,
+        )
+        self.youtube_help_label.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+
         # ── Options ───────────────────────────────────────────────────────────
         options = tk.Frame(root, bg=BG)
         options.grid(row=2, column=0, sticky="ew", padx=(0, 10), pady=(18, 18))
@@ -503,6 +596,7 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self._set_drop_zone_hover(False)
         self._set_status("Ready", "neutral")
         self._log("Ready. whisper.cpp backend is active.")
+        self._log("You can load local files or paste a YouTube playlist link.")
 
     def _update_scrollbar(self, top, bottom):
         self._scroll_top = float(top)
@@ -578,6 +672,190 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         if paths:
             self._set_files(paths)
 
+    def _is_youtube_url(self, url):
+        url = url.strip()
+        if not url or not YOUTUBE_URL_PATTERN.match(url):
+            return False
+        host = urlparse(url).netloc.lower()
+        return host.endswith("youtube.com") or host == "youtu.be"
+
+    def _find_yt_dlp(self):
+        venv_name = "yt-dlp.exe" if os.name == "nt" else "yt-dlp"
+        venv_dir = "Scripts" if os.name == "nt" else "bin"
+        venv_ytdlp = self.runtime_dir / ".venv" / venv_dir / venv_name
+        if venv_ytdlp.exists():
+            return str(venv_ytdlp)
+        return self._find_binary(("yt-dlp",))
+
+    def _clear_youtube_queue(self):
+        self.youtube_entries = []
+        self.youtube_playlist_title = ""
+
+    def _clear_file_queue(self):
+        self.file_paths = []
+        self.file_var.set("No files selected")
+        self.file_help_var.set("Choose one or more audio or video files to create text transcripts.")
+        self.file_help_label.config(fg=MUTED)
+
+    def _set_youtube_queue(self, playlist_title, entries):
+        self._clear_file_queue()
+        self.youtube_playlist_title = playlist_title
+        self.youtube_entries = entries
+
+        if len(entries) == 1:
+            title = entries[0]["title"]
+            self.file_var.set(title)
+            self.file_help_var.set("YouTube video loaded. The transcript will be saved in Downloads/WhisperDrop.")
+        else:
+            preview_names = [entry["title"] for entry in entries[:3]]
+            preview = ", ".join(preview_names)
+            if len(entries) > 3:
+                preview += f", +{len(entries) - 3} more"
+            self.file_var.set(f"{len(entries)} YouTube videos loaded")
+            self.file_help_var.set(f"Playlist: {playlist_title}. Queue: {preview}")
+
+        self.file_help_label.config(fg=GREEN)
+        self.youtube_help_var.set(f"Loaded {len(entries)} item(s) from: {playlist_title}")
+        self.youtube_help_label.config(fg=GREEN)
+        self._set_status(f"{len(entries)} YouTube item(s) loaded. Ready to transcribe.", "success")
+        self._log(f"Loaded YouTube playlist: {playlist_title}")
+        for entry in entries:
+            self._log(f"  - {entry['index']:03d}. {entry['title']}")
+
+    def _load_youtube_playlist(self):
+        url = self.youtube_url_var.get().strip()
+        if not self._is_youtube_url(url):
+            messagebox.showerror("Invalid URL", "Paste a valid YouTube video or playlist link.")
+            return
+
+        self._set_youtube_busy(True)
+        threading.Thread(target=self._fetch_youtube_playlist, args=(url,), daemon=True).start()
+
+    def _fetch_youtube_playlist(self, url):
+        try:
+            entries, playlist_title = self._list_youtube_entries(url)
+            if not entries:
+                raise RuntimeError("No videos were found in that YouTube link.")
+            self._ui(self._set_youtube_queue, playlist_title, entries)
+        except Exception as exc:
+            self._ui(self._log, f"YouTube error:\n{exc}")
+            self._ui(self._set_status, "Could not load the YouTube playlist.", "error")
+            self._ui(lambda err=str(exc): messagebox.showerror("YouTube error", err))
+        finally:
+            self._ui(self._set_youtube_busy, False)
+
+    def _list_youtube_entries(self, url):
+        yt_dlp = self._find_yt_dlp()
+        if not yt_dlp:
+            raise RuntimeError("yt-dlp was not found. Run setup again to install it.")
+
+        self._ui(self._set_status, "Loading YouTube playlist...", "neutral")
+        self._ui(self._log, f"Fetching playlist metadata: {url}")
+
+        result = self._run_command(
+            [
+                yt_dlp,
+                "--flat-playlist",
+                "--dump-single-json",
+                "--no-warnings",
+                "--no-color",
+                url,
+            ]
+        )
+        if result.returncode != 0:
+            error_output = result.stderr.strip() or result.stdout.strip() or "Unknown yt-dlp error."
+            raise RuntimeError(error_output)
+
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("yt-dlp returned invalid playlist metadata.") from exc
+
+        raw_entries = payload.get("entries") or [payload]
+        playlist_title = payload.get("title") or payload.get("playlist_title") or "YouTube playlist"
+
+        entries = []
+        for index, item in enumerate(raw_entries, start=1):
+            if not item:
+                continue
+
+            video_id = item.get("id")
+            title = item.get("title") or f"Video {index}"
+            webpage_url = item.get("url") or item.get("webpage_url")
+            if webpage_url and not webpage_url.startswith("http"):
+                webpage_url = f"https://www.youtube.com/watch?v={webpage_url}"
+            elif video_id and not webpage_url:
+                webpage_url = f"https://www.youtube.com/watch?v={video_id}"
+
+            if not webpage_url:
+                continue
+
+            entries.append(
+                {
+                    "index": index,
+                    "id": video_id or f"item-{index}",
+                    "title": title,
+                    "url": webpage_url,
+                }
+            )
+
+        return entries, playlist_title
+
+    def _sanitize_folder_name(self, value):
+        cleaned = re.sub(r'[<>:"/\\|?*]+', "-", value).strip(" .")
+        return cleaned or "youtube-playlist"
+
+    def _download_youtube_audio(self, entry, playlist_dir):
+        yt_dlp = self._find_yt_dlp()
+        if not yt_dlp:
+            raise RuntimeError("yt-dlp was not found. Run setup again to install it.")
+
+        playlist_dir.mkdir(parents=True, exist_ok=True)
+        output_template = str(playlist_dir / f"{entry['index']:03d} - %(title)s [%(id)s].%(ext)s")
+
+        self._ui(self._log, f"Downloading audio: {entry['title']}")
+        result = self._run_command(
+            [
+                yt_dlp,
+                "--no-playlist",
+                "--no-warnings",
+                "--no-color",
+                "-f",
+                "bestaudio/best",
+                "-x",
+                "--audio-format",
+                "best",
+                "-o",
+                output_template,
+                entry["url"],
+            ]
+        )
+        if result.returncode != 0:
+            error_output = result.stderr.strip() or result.stdout.strip() or "Unknown yt-dlp error."
+            raise RuntimeError(error_output)
+
+        matches = sorted(playlist_dir.glob(f"{entry['index']:03d} - * [{entry['id']}].*"))
+        if not matches:
+            matches = sorted(playlist_dir.glob(f"{entry['index']:03d} - *"))
+        if not matches:
+            raise RuntimeError("yt-dlp finished without creating the audio file.")
+
+        return matches[0]
+
+    def _set_youtube_busy(self, busy):
+        state = "disabled" if busy else "normal"
+        self.youtube_entry.config(state=state)
+        if busy:
+            self.youtube_btn.config(text="Loading...  ⏳", fg=MUTED, cursor="")
+            self.youtube_btn_frame.config(cursor="")
+            self.youtube_btn.unbind("<Button-1>")
+            self.youtube_btn_frame.unbind("<Button-1>")
+        else:
+            self.youtube_btn.config(text="Load Playlist  ▶️", fg=GREEN, cursor="hand2")
+            self.youtube_btn_frame.config(cursor="hand2")
+            self.youtube_btn.bind("<Button-1>", lambda _e: self._load_youtube_playlist())
+            self.youtube_btn_frame.bind("<Button-1>", lambda _e: self._load_youtube_playlist())
+
     def _set_files(self, paths):
         valid_files = []
         invalid_files = []
@@ -601,6 +879,11 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         if not valid_files:
             messagebox.showerror("Unsupported files", f"Supported formats: {', '.join(sorted(SUPPORTED))}")
             return
+
+        self._clear_youtube_queue()
+        self.youtube_url_var.set("")
+        self.youtube_help_var.set("Paste a YouTube playlist or video link, then load it into the queue.")
+        self.youtube_help_label.config(fg=MUTED)
 
         self.file_paths = valid_files
         if len(valid_files) == 1:
@@ -658,17 +941,17 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         return [entry for entry in result.stdout.split(os.pathsep) if entry]
 
+    def _local_tool_roots(self):
+        roots = [
+            self.runtime_dir / ".tools" / "ffmpeg" / "bin",
+            self.runtime_dir / ".tools" / "whisper.cpp" / "Release",
+            self.runtime_dir / ".tools" / "whisper.cpp" / "build" / "bin" / "Release",
+            self.runtime_dir / ".tools" / "whisper.cpp" / "build" / "bin",
+        ]
+        return roots
+
     def _find_binary(self, names):
-        local_roots = []
-        if os.name == "nt":
-            local_roots.extend(
-                [
-                    self.app_dir / ".tools" / "ffmpeg" / "bin",
-                    self.app_dir / ".tools" / "whisper.cpp" / "Release",
-                    self.app_dir / ".tools" / "whisper.cpp" / "build" / "bin" / "Release",
-                    self.app_dir / ".tools" / "whisper.cpp" / "build" / "bin",
-                ]
-            )
+        local_roots = self._local_tool_roots() if os.name in {"nt", "posix"} else []
 
         search_roots = []
         seen_roots = set()
@@ -689,7 +972,7 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         for root in local_roots:
             for name in names:
-                candidate = root / f"{name}.exe"
+                candidate = root / (f"{name}.exe" if os.name == "nt" else name)
                 if candidate.exists():
                     return str(candidate)
 
@@ -701,12 +984,64 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         return None
 
+    def _ggml_search_dirs(self, binary_dir):
+        search_dirs = [binary_dir]
+        for relative in ("../libexec", "../lib", "libexec", "lib"):
+            candidate = (binary_dir / relative).resolve()
+            if candidate.exists() and candidate not in search_dirs:
+                search_dirs.append(candidate)
+
+        brew = shutil.which("brew")
+        if brew:
+            try:
+                result = subprocess.run(
+                    [brew, "--prefix", "ggml"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=False,
+                )
+            except OSError:
+                result = None
+
+            if result and result.returncode == 0:
+                prefix = Path(result.stdout.strip())
+                for relative in ("libexec", "lib"):
+                    candidate = prefix / relative
+                    if candidate.exists() and candidate not in search_dirs:
+                        search_dirs.append(candidate)
+
+        return search_dirs
+
+    def _has_metal_backend(self, binary_dir):
+        metal_names = ("libggml-metal.so", "libggml-metal.dylib", "libggml-metal.0.dylib")
+        for search_dir in self._ggml_search_dirs(binary_dir):
+            for name in metal_names:
+                if (search_dir / name).exists():
+                    return True
+        return False
+
     def _detect_whisper_backend(self, whisper_cpp):
         binary_dir = self._binary_dir(whisper_cpp)
-        has_vulkan = (binary_dir / "ggml-vulkan.dll").exists()
-        if has_vulkan:
-            return "vulkan"
+        if os.name == "nt":
+            if (binary_dir / "ggml-vulkan.dll").exists():
+                return "vulkan"
+            return "cpu"
+
+        if sys.platform == "darwin" and self._has_metal_backend(binary_dir):
+            return "metal"
+
         return "cpu"
+
+    def _backend_label(self, backend):
+        labels = {
+            "vulkan": "Vulkan GPU",
+            "metal": "Metal GPU",
+            "cpu": "CPU",
+            "cpu-fallback": "CPU fallback",
+        }
+        return labels.get(backend, "CPU")
 
     def _download_model(self, model_name, model_info):
         self.model_dir.mkdir(parents=True, exist_ok=True)
@@ -777,25 +1112,25 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         return wav_path
 
-    def _next_output_base(self, source_path):
-        original_base = source_path.parent / source_path.stem
-        if not original_base.with_suffix(".txt").exists():
-            return original_base
+    def _resolve_output_paths(self, source_path):
+        source_path = Path(source_path)
+        txt_path = source_path.with_suffix(".txt")
+        if not txt_path.exists():
+            return source_path.with_suffix(""), txt_path
 
         counter = 2
         while True:
-            candidate = original_base.with_name(f"{original_base.name} ({counter})")
-            if not candidate.with_suffix(".txt").exists():
-                self._ui(self._log, f"Existing transcript found. Saving as: {candidate.name}.txt")
-                return candidate
+            alt_txt = source_path.with_name(f"{source_path.stem} ({counter}).txt")
+            if not alt_txt.exists():
+                self._ui(self._log, f"Existing transcript found. Saving as: {alt_txt.name}")
+                return alt_txt.with_suffix(""), alt_txt
             counter += 1
-
     def _run_whisper_cpp(self, source_path, audio_path, model_name, model_path, language):
         whisper_cpp = self._find_binary(("whisper-cli", "whisper-cpp"))
         if not whisper_cpp:
             raise RuntimeError("whisper.cpp was not found. Run setup again to install it.")
 
-        output_base = self._next_output_base(source_path)
+        output_base, output_file = self._resolve_output_paths(source_path)
         threads = max(1, min(8, os.cpu_count() or 4))
         backend = self._detect_whisper_backend(whisper_cpp)
         cmd = [
@@ -814,15 +1149,13 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         ]
 
         self._ui(self._set_status, f"Transcribing with {model_name}...", "neutral")
-        if backend == "vulkan":
-            self._ui(self._log, "Starting whisper.cpp with Vulkan GPU backend.")
-        else:
-            self._ui(self._log, "Starting whisper.cpp with CPU backend.")
+        backend_label = self._backend_label(backend)
+        self._ui(self._log, f"Starting whisper.cpp with {backend_label} backend.")
         result = self._run_command(cmd)
 
         if result.returncode != 0:
-            if backend == "vulkan":
-                self._ui(self._log, "Vulkan backend failed. Retrying on CPU...")
+            if backend in {"vulkan", "metal"}:
+                self._ui(self._log, f"{backend_label} backend failed. Retrying on CPU...")
                 cpu_cmd = cmd + ["--no-gpu"]
                 cpu_result = self._run_command(cpu_cmd)
                 if cpu_result.returncode == 0:
@@ -835,9 +1168,12 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
                 error_output = result.stderr.strip() or result.stdout.strip() or "Unknown whisper.cpp error."
                 raise RuntimeError(error_output)
 
-        output_file = output_base.with_suffix(".txt")
         if not output_file.exists():
-            raise RuntimeError("whisper.cpp finished without creating the transcript file.")
+            matches = sorted(source_path.parent.glob(f"{source_path.stem}*.txt"))
+            if matches:
+                output_file = matches[0]
+            else:
+                raise RuntimeError("whisper.cpp finished without creating the transcript file.")
 
         cli_output = (result.stdout or result.stderr or "").strip()
         if cli_output:
@@ -845,8 +1181,8 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         if backend == "cpu-fallback":
             self._ui(self._log, "Transcription completed on CPU fallback.")
-        elif backend == "vulkan":
-            self._ui(self._log, "Transcription completed with Vulkan GPU backend.")
+        elif backend in {"vulkan", "metal"}:
+            self._ui(self._log, f"Transcription completed with {self._backend_label(backend)} backend.")
 
         return output_file
 
@@ -875,6 +1211,11 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             self.run_btn.config(cursor="")
             self.run_btn.unbind("<Button-1>")
             self.run_btn_frame.unbind("<Button-1>")
+            self.youtube_entry.config(state="disabled")
+            self.youtube_btn.config(text="Load Playlist  ▶️", fg=MUTED, cursor="")
+            self.youtube_btn_frame.config(cursor="")
+            self.youtube_btn.unbind("<Button-1>")
+            self.youtube_btn_frame.unbind("<Button-1>")
             self.progress.grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 10))
             self.progress.start(10)
             self._set_status("Transcription in progress...", "neutral")
@@ -884,12 +1225,17 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             self.run_btn.config(cursor="hand2")
             self.run_btn.bind("<Button-1>", lambda e: self._run_transcription())
             self.run_btn_frame.bind("<Button-1>", lambda e: self._run_transcription())
+            self.youtube_entry.config(state="normal")
+            self.youtube_btn.config(text="Load Playlist  ▶️", fg=GREEN, cursor="hand2")
+            self.youtube_btn_frame.config(cursor="hand2")
+            self.youtube_btn.bind("<Button-1>", lambda _e: self._load_youtube_playlist())
+            self.youtube_btn_frame.bind("<Button-1>", lambda _e: self._load_youtube_playlist())
             self.progress.stop()
             self.progress.grid_forget()
 
     def _run_transcription(self):
-        if not self.file_paths:
-            messagebox.showwarning("No files", "Please select at least one file first.")
+        if not self.file_paths and not self.youtube_entries:
+            messagebox.showwarning("No input", "Select local files or load a YouTube playlist first.")
             return
 
         self._set_busy(True)
@@ -901,22 +1247,40 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             model_name = self.model_var.get()
             model_info = MODELS[model_name]
             model_path = self._download_model(model_name, model_info)
-            selected_files = [Path(path) for path in self.file_paths]
             saved_outputs = []
             failed_files = []
 
-            for index, source_path in enumerate(selected_files, start=1):
-                self._ui(self._log, "")
-                self._ui(self._log, f"[{index}/{len(selected_files)}] Processing: {source_path.name}")
-                try:
-                    with tempfile.TemporaryDirectory(prefix="transcriber-") as temp_dir:
-                        audio_path = self._prepare_audio(source_path, temp_dir)
-                        output_file = self._run_whisper_cpp(source_path, audio_path, model_name, model_path, language)
-                    saved_outputs.append(output_file)
-                    self._ui(self._log, f"Saved: {output_file}")
-                except Exception as exc:
-                    failed_files.append((source_path, str(exc)))
-                    self._ui(self._log, f"Error while processing {source_path.name}:\n{exc}")
+            if self.youtube_entries:
+                playlist_dir = self.download_dir / self._sanitize_folder_name(self.youtube_playlist_title)
+                self._ui(self._log, f"Saving YouTube downloads and transcripts to: {playlist_dir}")
+                total_items = len(self.youtube_entries)
+                for index, entry in enumerate(self.youtube_entries, start=1):
+                    self._ui(self._log, "")
+                    self._ui(self._log, f"[{index}/{total_items}] YouTube: {entry['title']}")
+                    try:
+                        source_path = self._download_youtube_audio(entry, playlist_dir)
+                        with tempfile.TemporaryDirectory(prefix="transcriber-") as temp_dir:
+                            audio_path = self._prepare_audio(source_path, temp_dir)
+                            output_file = self._run_whisper_cpp(source_path, audio_path, model_name, model_path, language)
+                        saved_outputs.append(output_file)
+                        self._ui(self._log, f"Saved: {output_file}")
+                    except Exception as exc:
+                        failed_files.append((Path(entry["title"]), str(exc)))
+                        self._ui(self._log, f"Error while processing {entry['title']}:\n{exc}")
+            else:
+                selected_files = [Path(path) for path in self.file_paths]
+                for index, source_path in enumerate(selected_files, start=1):
+                    self._ui(self._log, "")
+                    self._ui(self._log, f"[{index}/{len(selected_files)}] Processing: {source_path.name}")
+                    try:
+                        with tempfile.TemporaryDirectory(prefix="transcriber-") as temp_dir:
+                            audio_path = self._prepare_audio(source_path, temp_dir)
+                            output_file = self._run_whisper_cpp(source_path, audio_path, model_name, model_path, language)
+                        saved_outputs.append(output_file)
+                        self._ui(self._log, f"Saved: {output_file}")
+                    except Exception as exc:
+                        failed_files.append((source_path, str(exc)))
+                        self._ui(self._log, f"Error while processing {source_path.name}:\n{exc}")
 
             if saved_outputs:
                 self._open_output_dirs([output.parent for output in saved_outputs])

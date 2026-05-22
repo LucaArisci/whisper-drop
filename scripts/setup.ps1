@@ -558,6 +558,12 @@ Write-Host "Installing Python packages..."
 Write-Host "Running installation checks..."
 & $venvPython -c "import tkinter; import tkinterdnd2; print('tkinter OK'); print('tkinterdnd2 OK')"
 
+$ytdlp = Join-Path $VenvDir "Scripts\yt-dlp.exe"
+if (-not (Test-Path $ytdlp)) {
+    throw "yt-dlp was not found in the local virtual environment."
+}
+& $ytdlp --version *> $null
+
 Write-Section "Setup complete"
 Write-Host "To open the app:"
 Write-Host "  double-click 'WhisperDrop.bat'"

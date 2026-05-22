@@ -5,8 +5,14 @@ set -e
 
 cd "$(dirname "$0")"
 
-VENV_PYTHON="$PWD/.venv/bin/python"
+APP_DIR="${WHISPERDROP_APP_DIR:-$PWD}"
+RUNTIME_DIR="${WHISPERDROP_RUNTIME_DIR:-$APP_DIR}"
+VENV_PYTHON="$RUNTIME_DIR/.venv/bin/python"
 NEEDS_SETUP=0
+
+mkdir -p "$RUNTIME_DIR"
+export WHISPERDROP_APP_DIR="$APP_DIR"
+export WHISPERDROP_RUNTIME_DIR="$RUNTIME_DIR"
 
 bootstrap_path() {
   local login_shell=""
@@ -53,7 +59,26 @@ resolve_brew_bin() {
 
 bootstrap_path
 
+find_ffmpeg() {
+  if command -v ffmpeg >/dev/null 2>&1; then
+    command -v ffmpeg
+    return 0
+  fi
+
+  resolve_brew_bin ffmpeg ffmpeg && return 0
+
+  local bundled="$RUNTIME_DIR/.tools/ffmpeg/bin/ffmpeg"
+  if [ -x "$bundled" ]; then
+    echo "$bundled"
+    return 0
+  fi
+
+  return 1
+}
+
 find_whisper_cpp() {
+  local candidate=""
+
   if command -v whisper-cli >/dev/null 2>&1; then
     command -v whisper-cli
     return 0
@@ -67,16 +92,16 @@ find_whisper_cpp() {
   resolve_brew_bin whisper-cpp whisper-cli && return 0
   resolve_brew_bin whisper-cpp whisper-cpp && return 0
 
-  return 1
-}
-
-find_ffmpeg() {
-  if command -v ffmpeg >/dev/null 2>&1; then
-    command -v ffmpeg
-    return 0
-  fi
-
-  resolve_brew_bin ffmpeg ffmpeg && return 0
+  for candidate in \
+    "$RUNTIME_DIR/.tools/whisper.cpp/build/bin/whisper-cli" \
+    "$RUNTIME_DIR/.tools/whisper.cpp/build/bin/whisper-cpp" \
+    "$RUNTIME_DIR/.tools/whisper.cpp/build/bin/Release/whisper-cli" \
+    "$RUNTIME_DIR/.tools/whisper.cpp/build/bin/Release/whisper-cpp"; do
+    if [ -x "$candidate" ]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
 
   return 1
 }
@@ -106,7 +131,7 @@ fi
 if [ "$NEEDS_SETUP" -eq 1 ]; then
   echo "First launch detected. Running setup..."
   echo ""
-  if ! bash "$PWD/scripts/setup.sh"; then
+  if ! bash "$APP_DIR/scripts/setup.sh"; then
     echo ""
     echo "Setup failed. Please review the messages above."
     pause_on_error
@@ -121,4 +146,4 @@ if [ ! -x "$VENV_PYTHON" ]; then
   exit 1
 fi
 
-exec "$VENV_PYTHON" "$PWD/transcriber.py"
+exec "$VENV_PYTHON" "$APP_DIR/transcriber.py"

@@ -1,169 +1,163 @@
-# whisper-drop
+# WhisperDrop
 
-A minimal desktop app to transcribe one or more audio files with drag & drop, powered by whisper.cpp and quantized GGML models.
+WhisperDrop is a desktop transcription app for local audio/video files and YouTube links. It uses `whisper.cpp` with quantized GGML models, so it can run on lower-end hardware without requiring a cloud transcription service.
 
 ![WhisperDrop screenshot](assets/screenshot.png)
 
----
-
 ## Features
 
-- Drag & drop one or more audio or video files onto the window
-- Supports `.mp3`, `.wav`, `.m4a`, `.ogg`, `.flac`, `.opus`, `.webm`, `.mp4`, `.aac`
-- Quantized GGML models (Q5/Q8) for lower resource usage on CPU
-- Models are downloaded automatically on first use and cached locally
-- Two-column layout with live log panel
-- Outputs one `.txt` file per source item, saved next to the original audio
-- No technical knowledge required to use
+- Drag and drop one or more audio or video files
+- Paste a YouTube video or playlist link and queue it for transcription
+- Supports `.mp3`, `.wav`, `.m4a`, `.ogg`, `.flac`, `.opus`, `.webm`, `.mp4`, and `.aac`
+- Uses quantized GGML models from `whisper.cpp`
+- Downloads models automatically on first use and caches them locally
+- Uses Metal on macOS when the local `whisper.cpp` build supports it, with CPU fallback
+- Uses Vulkan on Windows when available, with CPU fallback
+- Saves one `.txt` transcript per source item
+- Provides a two-column UI with a live log panel
 
----
+## Download
+
+For macOS, use the packaged artifact from GitHub Releases when available:
+
+1. Download `WhisperDrop-1.0.0.dmg` from the Releases page.
+2. Open the DMG.
+3. Drag `WhisperDrop.app` into `Applications`.
+4. Open `WhisperDrop` from Applications or Spotlight.
+
+The macOS app stores its runtime environment, downloaded tools, and model cache in:
+
+```text
+~/Library/Application Support/WhisperDrop
+```
+
+If macOS blocks the app because it was downloaded from the internet, right-click `WhisperDrop.app`, choose **Open**, then confirm once.
 
 ## Requirements
 
 - macOS or Windows
-- Internet connection for the first setup and first use of each model
+- Internet connection for first setup, YouTube downloads, and first use of each model
+- Enough disk space for selected models. Turbo Q5 is about 547 MB; Turbo Q8 is about 874 MB.
 
----
-
-## Installation
+## Install From Source
 
 ### macOS
 
-Clone the repo:
-
 ```bash
-git clone https://github.com/your-username/whisper-drop.git
+git clone https://github.com/LucaArisci/whisper-drop.git
 cd whisper-drop
-chmod +x WhisperDrop.command
-chmod +x WhisperDrop_installer.command
-```
-
-Then run the installer:
-
-```bash
+chmod +x WhisperDrop.command WhisperDrop_installer.command scripts/setup.sh
 ./scripts/setup.sh
 ```
 
-Or double-click `WhisperDrop_installer.command` from Finder.
+Then run either:
 
-This will automatically install:
-- [Homebrew](https://brew.sh)
-- ffmpeg
-- whisper.cpp (`whisper-cli`)
-- Python 3.11
-- tkinterdnd2 (in a local `.venv`)
+```bash
+./WhisperDrop.command
+```
 
-> **Note:** Setup takes a few minutes the first time.
+or build a macOS app bundle:
+
+```bash
+./script/build_and_run.sh --verify
+```
+
+This creates `dist/WhisperDrop.app`.
+
+To create a release DMG:
+
+```bash
+./scripts/package_dmg.sh 1.0.0
+```
+
+The DMG is written to `build/package/WhisperDrop-1.0.0.dmg`.
 
 ### Windows
 
-Clone the repo:
-
 ```powershell
-git clone https://github.com/your-username/whisper-drop.git
+git clone https://github.com/LucaArisci/whisper-drop.git
 cd whisper-drop
-```
-
-Then run the installer:
-
-```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1
 ```
 
 Or double-click `WhisperDrop_installer.bat`.
 
-This will automatically:
-- install Python 3.11 with `winget` if missing
-- download a local `ffmpeg` build if it is not already available
-- install the Vulkan SDK and Visual Studio Build Tools if needed
-- build `whisper.cpp` locally with Vulkan GPU support inside `.tools/whisper.cpp`
-- install `tkinterdnd2` in a local `.venv`
-
-> **Note:** On Windows, the first setup can take a while because `whisper.cpp` is built locally with Vulkan support. If Vulkan is not available on a given PC, the app will fall back to CPU automatically.
-
----
+The Windows setup installs Python 3.11 if needed, prepares a local virtual environment, installs `yt-dlp`, downloads or builds the required media tools, and prepares `whisper.cpp` with Vulkan support where possible.
 
 ## Usage
 
-Double-click `WhisperDrop.command` on macOS or `WhisperDrop.bat` on Windows to open the app.
-
-> **On first launch**, the platform launcher will run setup automatically if it hasn't been done yet.
-
-> **Gatekeeper warning (macOS):** macOS may block `.command` files downloaded from the internet. If you see a *"Not Opened"* warning, click **Done**, then run this once in Terminal:
->
-> ```bash
-> xattr -d com.apple.quarantine /path/to/WhisperDrop.command
-> xattr -d com.apple.quarantine /path/to/scripts/setup.sh
-> xattr -d com.apple.quarantine "/path/to/WhisperDrop_installer.command"
-> ```
-
-Once the app is open:
-
-1. Drag & drop one or more audio files onto the window (or click to browse)
-2. Select the language and model
-3. Click **Start Transcription**
-4. A `.txt` file is saved next to each original audio file
-
----
+1. Open `WhisperDrop`.
+2. Drag and drop local audio/video files, or paste a YouTube video/playlist link and click **Load Playlist**.
+3. Choose the language and model.
+4. Click **Start Transcription**.
+5. Local file transcripts are saved next to the original file. YouTube transcripts are saved under `Downloads/WhisperDrop`.
 
 ## Models
 
-Models are downloaded from [HuggingFace](https://huggingface.co/ggerganov/whisper.cpp) on first use and cached in `.models/whisper.cpp/` inside the app folder.
+Models are downloaded from the [`ggerganov/whisper.cpp`](https://huggingface.co/ggerganov/whisper.cpp) Hugging Face repository.
 
-| Model | Size | Speed | Best for |
-|-------|------|-------|----------|
-| Tiny Q5 | ~32 MB | Fastest | Older or slower hardware |
-| Base Q5 | ~57 MB | Fast | Balanced choice for most users |
-| Small Q5 | ~190 MB | Medium | Better accuracy on complex audio |
-| Medium Q5 | ~515 MB | Slow | High accuracy |
-| Turbo Q5 | ~547 MB | Fast | Fast and accurate, recommended |
-| Turbo Q8 | ~874 MB | Medium | Maximum accuracy while quantized |
-
-**Turbo Q5** is the default and recommended for most use cases.
-
----
+| Model | Approx. size | Speed | Best for |
+| --- | ---: | --- | --- |
+| Tiny Q5 | 32 MB | Fastest | Older or slower hardware |
+| Base Q5 | 57 MB | Fast | Balanced lightweight use |
+| Small Q5 | 190 MB | Medium | Better accuracy on common audio |
+| Medium Q5 | 515 MB | Slow | Higher accuracy |
+| Turbo Q5 | 547 MB | Fast | Recommended default |
+| Turbo Q8 | 874 MB | Medium | Higher quality quantized output |
 
 ## Development
 
-To run the app with hot reload while editing `transcriber.py`:
+Run the app directly:
 
 ```bash
-# Install watchdog once
-.venv/bin/pip install watchdog
+.venv/bin/python transcriber.py
+```
 
-# Start the dev watcher
+Run with hot reload:
+
+```bash
+.venv/bin/pip install watchdog
 .venv/bin/python scripts/dev.py
 ```
 
-On Windows, use the equivalent executables under `.venv\Scripts\`.
+Build and verify the macOS app bundle:
 
-Every time you save `transcriber.py` the app will restart automatically.
+```bash
+./script/build_and_run.sh --verify
+```
 
----
+Package a DMG:
 
-## Project structure
+```bash
+./scripts/package_dmg.sh 1.0.0
+```
+
+## Project Structure
 
 ```text
 whisper-drop/
+|-- assets/
+|   |-- app-icon/                  # macOS app icon source
+|   `-- screenshot.png             # README screenshot
+|-- script/
+|   `-- build_and_run.sh           # Build and launch helper for macOS app bundle
 |-- scripts/
+|   |-- build_macos_app.sh         # Creates dist/WhisperDrop.app
+|   |-- package_dmg.sh             # Creates build/package/WhisperDrop-<version>.dmg
 |   |-- setup.sh                   # macOS setup script
 |   |-- setup.ps1                  # Windows setup script
-|   `-- dev.py                     # Hot-reload dev launcher
-|-- transcriber.py                 # Main app
-|-- WhisperDrop.command            # macOS launcher
+|   `-- dev.py                     # Development hot-reload launcher
+|-- transcriber.py                 # Main Tkinter app
+|-- WhisperDrop.command            # macOS source launcher
 |-- WhisperDrop.bat                # Windows launcher
-|-- WhisperDrop_installer.command  # macOS installer
-|-- WhisperDrop_installer.bat      # Windows installer
-|-- requirements.txt               # Python dependencies
-|-- .gitignore
+|-- WhisperDrop_installer.command  # macOS installer launcher
+|-- WhisperDrop_installer.bat      # Windows installer launcher
+|-- requirements.txt
 |-- LICENSE
-|-- README.md
-|-- .venv/                         # Local Python environment (created by setup)
-|-- .tools/                        # Local Windows helper tools/builds (created by setup)
-`-- .models/whisper.cpp/           # Cached GGML models (created on first use)
+`-- README.md
 ```
 
----
+Generated folders such as `.venv/`, `.tools/`, `.models/`, `dist/`, and `build/` are intentionally ignored.
 
 ## License
 
