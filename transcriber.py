@@ -106,6 +106,12 @@ def _default_app_dir():
     return Path(__file__).resolve().parent
 
 
+def _bundle_dir():
+    if _is_frozen_app() and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS).resolve()
+    return None
+
+
 def _default_runtime_dir(app_dir):
     if _is_frozen_app() and os.name == "nt":
         local_app_data = os.environ.get("LOCALAPPDATA")
@@ -124,7 +130,12 @@ def _resolve_app_dirs():
 
 def _tool_roots(app_dir, runtime_dir):
     roots = []
-    for base_dir in (runtime_dir, app_dir):
+    base_dirs = [runtime_dir, app_dir]
+    bundle_dir = _bundle_dir()
+    if bundle_dir:
+        base_dirs.append(bundle_dir)
+
+    for base_dir in base_dirs:
         roots.extend(
             [
                 base_dir / ".tools" / "ffmpeg" / "bin",

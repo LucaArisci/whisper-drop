@@ -2,6 +2,7 @@ param(
     [string]$Version = "1.0.0",
     [switch]$NoBundleTools,
     [switch]$NoClean,
+    [switch]$OneFile,
     [switch]$Verify
 )
 
@@ -15,9 +16,13 @@ $BuildRoot = Join-Path $RootDir "build\windows"
 $WorkDir = Join-Path $BuildRoot "pyinstaller"
 $DistRoot = Join-Path $RootDir "dist"
 $AppDist = Join-Path $DistRoot $AppName
+$OneFileDist = Join-Path $DistRoot "$AppName-onefile"
 $IconPng = Join-Path $RootDir "assets\app-icon\whisperdrop-icon.png"
 $IconIco = Join-Path $BuildRoot "WhisperDrop.ico"
 $ExePath = Join-Path $AppDist "$AppName.exe"
+if ($OneFile) {
+    $ExePath = Join-Path $OneFileDist "$AppName.exe"
+}
 
 function Write-Section {
     param([string]$Title)
@@ -158,42 +163,68 @@ function Copy-ReleaseTools {
     }
 }
 
-function New-ReleaseLauncher {
-    $launcherPath = Join-Path $AppDist "Start-WhisperDrop.bat"
-    $launcher = @'
-@echo off
-setlocal
-cd /d "%~dp0"
+function Get-WhisperSourceDir {
+    $whisperSource = Join-Path $RootDir ".tools\whisper.cpp\build\bin\Release"
+    if (-not (Test-Path $whisperSource)) {
+        $whisperSource = Join-Path $RootDir ".tools\whisper.cpp\Release"
+    }
+    return $whisperSource
+}
 
-echo Preparing WhisperDrop for first launch...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$root = [IO.Path]::GetFullPath('%~dp0'); Get-ChildItem -LiteralPath $root -Recurse -Force | Unblock-File -ErrorAction SilentlyContinue"
+function Add-BundledToolArgs {
+    param([string[]]$PyInstallerArgs)
 
-start "" "%~dp0WhisperDrop.exe"
-'@
-    $launcher | Set-Content -LiteralPath $launcherPath -Encoding ASCII
+    if ($NoBundleTools) {
+        Write-Host "Skipping bundled runtime tools."
+        return $PyInstallerArgs
+    }
+
+    $ffmpeg = Join-Path $RootDir ".tools\ffmpeg\bin\ffmpeg.exe"
+    if (Test-Path $ffmpeg) {
+        $PyInstallerArgs += @("--add-binary", "$ffmpeg;.tools\ffmpeg\bin")
+    } else {
+        Write-Warning "ffmpeg was not found under .tools. Run scripts\setup.ps1 before packaging a fully portable build."
+    }
+
+    $whisperSource = Get-WhisperSourceDir
+    foreach ($name in @("whisper-cli.exe", "whisper.dll", "ggml.dll", "ggml-base.dll", "ggml-cpu.dll", "ggml-vulkan.dll")) {
+        $sourcePath = Join-Path $whisperSource $name
+        if (Test-Path $sourcePath) {
+            $PyInstallerArgs += @("--add-binary", "$sourcePath;.tools\whisper.cpp\build\bin\Release")
+        }
+    }
+
+    return $PyInstallerArgs
 }
 
 Write-Section "$AppName - Windows EXE Build"
 Ensure-Venv
 Ensure-BuildPackages
 
-if ((Test-Path $AppDist) -and (-not $NoClean)) {
-    Remove-Item -LiteralPath $AppDist -Recurse -Force
+$ActiveDist = if ($OneFile) { $OneFileDist } else { $AppDist }
+if ((Test-Path $ActiveDist) -and (-not $NoClean)) {
+    Remove-Item -LiteralPath $ActiveDist -Recurse -Force
 }
 
 New-Item -ItemType Directory -Path $BuildRoot -Force | Out-Null
 $ResolvedIcon = New-AppIcon
+$PyInstallerDistPath = if ($OneFile) { $OneFileDist } else { $DistRoot }
 
 $pyinstallerArgs = @(
     "--noconfirm",
     "--windowed",
     "--name", $AppName,
-    "--distpath", $DistRoot,
+    "--distpath", $PyInstallerDistPath,
     "--workpath", $WorkDir,
     "--specpath", $BuildRoot,
     "--collect-all", "tkinterdnd2",
     "--collect-all", "yt_dlp"
 )
+
+if ($OneFile) {
+    $pyinstallerArgs += "--onefile"
+    $pyinstallerArgs = Add-BundledToolArgs $pyinstallerArgs
+}
 
 if (-not $NoClean) {
     $pyinstallerArgs += "--clean"
@@ -211,24 +242,26 @@ if (-not (Test-Path $ExePath)) {
     throw "PyInstaller did not create $ExePath."
 }
 
-Copy-Item -LiteralPath (Join-Path $RootDir "README.md") -Destination $AppDist -Force
-Copy-Item -LiteralPath (Join-Path $RootDir "LICENSE") -Destination $AppDist -Force
-if (Test-Path (Join-Path $RootDir "assets")) {
-    Copy-Item -LiteralPath (Join-Path $RootDir "assets") -Destination $AppDist -Recurse -Force
-}
+if (-not $OneFile) {
+    Copy-Item -LiteralPath (Join-Path $RootDir "README.md") -Destination $AppDist -Force
+    Copy-Item -LiteralPath (Join-Path $RootDir "LICENSE") -Destination $AppDist -Force
+    if (Test-Path (Join-Path $RootDir "assets")) {
+        Copy-Item -LiteralPath (Join-Path $RootDir "assets") -Destination $AppDist -Recurse -Force
+    }
 
-Copy-ReleaseTools
-New-ReleaseLauncher
+    Copy-ReleaseTools
+}
 
 $releaseInfo = @"
 WhisperDrop $Version
 
-Run Start-WhisperDrop.bat the first time after extracting the zip. It unblocks downloaded runtime DLLs, then opens WhisperDrop.exe.
-After the first successful launch, you can run WhisperDrop.exe directly.
+Run WhisperDrop.exe to open the app.
 Models are downloaded on first use and cached in %LOCALAPPDATA%\WhisperDrop\.models.
 YouTube downloads and transcripts are saved under the user's Downloads\WhisperDrop folder.
 "@
-$releaseInfo | Set-Content -LiteralPath (Join-Path $AppDist "RELEASE.txt") -Encoding UTF8
+if (-not $OneFile) {
+    $releaseInfo | Set-Content -LiteralPath (Join-Path $AppDist "RELEASE.txt") -Encoding UTF8
+}
 
 if ($Verify) {
     Write-Host "Running packaged self-test..."
