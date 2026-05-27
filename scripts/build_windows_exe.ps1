@@ -55,6 +55,30 @@ function Copy-DirectoryContents {
     return $true
 }
 
+function Copy-SelectedFiles {
+    param(
+        [string]$Source,
+        [string]$Destination,
+        [string[]]$Names
+    )
+
+    if (-not (Test-Path $Source)) {
+        return $false
+    }
+
+    $copiedAny = $false
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    foreach ($name in $Names) {
+        $sourcePath = Join-Path $Source $name
+        if (Test-Path $sourcePath) {
+            Copy-Item -LiteralPath $sourcePath -Destination $Destination -Force
+            $copiedAny = $true
+        }
+    }
+
+    return $copiedAny
+}
+
 function Ensure-Venv {
     if (Test-Path $VenvPython) {
         return
@@ -105,17 +129,26 @@ function Copy-ReleaseTools {
     }
 
     Write-Host "Copying bundled runtime tools..."
-    $copiedFfmpeg = Copy-DirectoryContents `
+    $copiedFfmpeg = Copy-SelectedFiles `
         -Source (Join-Path $RootDir ".tools\ffmpeg\bin") `
-        -Destination (Join-Path $AppDist ".tools\ffmpeg\bin")
+        -Destination (Join-Path $AppDist ".tools\ffmpeg\bin") `
+        -Names @("ffmpeg.exe")
 
     $whisperSource = Join-Path $RootDir ".tools\whisper.cpp\build\bin\Release"
     if (-not (Test-Path $whisperSource)) {
         $whisperSource = Join-Path $RootDir ".tools\whisper.cpp\Release"
     }
-    $copiedWhisper = Copy-DirectoryContents `
+    $copiedWhisper = Copy-SelectedFiles `
         -Source $whisperSource `
-        -Destination (Join-Path $AppDist ".tools\whisper.cpp\build\bin\Release")
+        -Destination (Join-Path $AppDist ".tools\whisper.cpp\build\bin\Release") `
+        -Names @(
+            "whisper-cli.exe",
+            "whisper.dll",
+            "ggml.dll",
+            "ggml-base.dll",
+            "ggml-cpu.dll",
+            "ggml-vulkan.dll"
+        )
 
     if (-not $copiedFfmpeg) {
         Write-Warning "ffmpeg was not found under .tools. Run scripts\setup.ps1 before packaging a fully portable build."

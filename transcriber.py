@@ -10,6 +10,7 @@ import threading
 import tkinter as tk
 import urllib.error
 import urllib.request
+import wave
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from urllib.parse import urlparse
@@ -215,6 +216,7 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self.file_paths = []
         self.youtube_entries = []
         self.youtube_playlist_title = ""
+        self._gpu_probe_results = {}
         self._window_icon = None
         self._set_window_icon()
 
@@ -242,8 +244,32 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self.after(250, self._fit_window_to_content)
         self._bind_shortcuts()
 
-    def _run_command(self, cmd):
-        return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    def _run_command(self, cmd, timeout=None, cwd=None):
+        kwargs = {
+            "stdin": subprocess.DEVNULL,
+            "capture_output": True,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "timeout": timeout,
+            "cwd": cwd,
+        }
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+        try:
+            return subprocess.run(cmd, **kwargs)
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout or ""
+            stderr = exc.stderr or ""
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode("utf-8", errors="replace")
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode("utf-8", errors="replace")
+
+            result = subprocess.CompletedProcess(cmd, -9, stdout=stdout, stderr=stderr)
+            result.timed_out = True
+            return result
 
     def _set_window_icon(self):
         icon_path = self.app_dir / "assets" / "app-icon" / "whisperdrop-icon.png"
@@ -1290,6 +1316,81 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
                 self._ui(self._log, f"Existing transcript found. Saving as: {alt_txt.name}")
                 return alt_txt.with_suffix(""), alt_txt
             counter += 1
+
+    def _command_timed_out(self, result):
+        return bool(getattr(result, "timed_out", False))
+
+    def _command_error_output(self, *results):
+        for result in results:
+            if not result:
+                continue
+            output = (result.stderr or result.stdout or "").strip()
+            if output:
+                return output
+        return "Unknown whisper.cpp error."
+
+    def _gpu_probe_timeout_seconds(self):
+        raw_timeout = os.environ.get("WHISPERDROP_GPU_PROBE_TIMEOUT", "90")
+        try:
+            timeout = int(raw_timeout)
+        except ValueError:
+            timeout = 90
+        return max(15, timeout)
+
+    def _write_probe_wav(self, wav_path):
+        sample_rate = 16000
+        sample_count = sample_rate // 4
+        with wave.open(str(wav_path), "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(b"\0\0" * sample_count)
+
+    def _probe_gpu_backend(self, whisper_cpp, model_path, language, threads, backend):
+        probe_key = (str(Path(whisper_cpp).resolve()), str(Path(model_path).resolve()), backend)
+        if probe_key in self._gpu_probe_results:
+            return self._gpu_probe_results[probe_key]
+
+        backend_label = self._backend_label(backend)
+        timeout = self._gpu_probe_timeout_seconds()
+        self._ui(self._log, f"Checking {backend_label} backend before transcription...")
+
+        with tempfile.TemporaryDirectory(prefix="whisperdrop-gpu-probe-") as probe_dir:
+            probe_dir = Path(probe_dir)
+            probe_audio = probe_dir / "probe.wav"
+            probe_output = probe_dir / "probe"
+            self._write_probe_wav(probe_audio)
+            probe_cmd = [
+                whisper_cpp,
+                "--model",
+                str(model_path),
+                "--file",
+                str(probe_audio),
+                "--threads",
+                str(max(1, min(threads, 4))),
+                "--language",
+                language,
+                "--output-file",
+                str(probe_output),
+                "--output-txt",
+            ]
+            result = self._run_command(probe_cmd, timeout=timeout, cwd=self._binary_dir(whisper_cpp))
+
+        if self._command_timed_out(result):
+            self._ui(self._log, f"{backend_label} backend did not become ready within {timeout}s. Retrying on CPU...")
+            self._gpu_probe_results[probe_key] = False
+            return False
+
+        if result.returncode != 0:
+            error_output = self._command_error_output(result)
+            first_line = error_output.splitlines()[0] if error_output else "Unknown whisper.cpp error."
+            self._ui(self._log, f"{backend_label} backend failed probe. Retrying on CPU... ({first_line})")
+            self._gpu_probe_results[probe_key] = False
+            return False
+
+        self._gpu_probe_results[probe_key] = True
+        return True
+
     def _run_whisper_cpp(self, source_path, audio_path, model_name, model_path, language):
         whisper_cpp = self._find_binary(("whisper-cli", "whisper-cpp"))
         if not whisper_cpp:
@@ -1298,6 +1399,9 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         output_base, output_file = self._resolve_output_paths(source_path)
         threads = max(1, min(8, os.cpu_count() or 4))
         backend = self._detect_whisper_backend(whisper_cpp)
+        if backend == "vulkan" and not self._probe_gpu_backend(whisper_cpp, model_path, language, threads, backend):
+            backend = "cpu-fallback"
+
         cmd = [
             whisper_cpp,
             "--model",
@@ -1316,21 +1420,22 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self._ui(self._set_status, f"Transcribing with {model_name}...", "neutral")
         backend_label = self._backend_label(backend)
         self._ui(self._log, f"Starting whisper.cpp with {backend_label} backend.")
-        result = self._run_command(cmd)
+        run_cmd = cmd + ["--no-gpu"] if backend == "cpu-fallback" else cmd
+        result = self._run_command(run_cmd, cwd=self._binary_dir(whisper_cpp))
 
         if result.returncode != 0:
             if backend in {"vulkan", "metal"}:
                 self._ui(self._log, f"{backend_label} backend failed. Retrying on CPU...")
                 cpu_cmd = cmd + ["--no-gpu"]
-                cpu_result = self._run_command(cpu_cmd)
+                cpu_result = self._run_command(cpu_cmd, cwd=self._binary_dir(whisper_cpp))
                 if cpu_result.returncode == 0:
                     result = cpu_result
                     backend = "cpu-fallback"
                 else:
-                    error_output = cpu_result.stderr.strip() or cpu_result.stdout.strip() or result.stderr.strip() or result.stdout.strip() or "Unknown whisper.cpp error."
+                    error_output = self._command_error_output(cpu_result, result)
                     raise RuntimeError(error_output)
             else:
-                error_output = result.stderr.strip() or result.stdout.strip() or "Unknown whisper.cpp error."
+                error_output = self._command_error_output(result)
                 raise RuntimeError(error_output)
 
         if not output_file.exists():
