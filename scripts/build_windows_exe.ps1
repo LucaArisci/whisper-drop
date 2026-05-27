@@ -197,6 +197,19 @@ function Add-BundledToolArgs {
     return $PyInstallerArgs
 }
 
+function Add-BundledAssetArgs {
+    param([string[]]$PyInstallerArgs)
+
+    $assetsDir = Join-Path $RootDir "assets"
+    if (Test-Path $assetsDir) {
+        $PyInstallerArgs += @("--add-data", "$assetsDir;assets")
+    } else {
+        Write-Warning "assets directory was not found; the packaged app will use default window icons."
+    }
+
+    return $PyInstallerArgs
+}
+
 Write-Section "$AppName - Windows EXE Build"
 Ensure-Venv
 Ensure-BuildPackages
@@ -223,6 +236,7 @@ $pyinstallerArgs = @(
 
 if ($OneFile) {
     $pyinstallerArgs += "--onefile"
+    $pyinstallerArgs = Add-BundledAssetArgs $pyinstallerArgs
     $pyinstallerArgs = Add-BundledToolArgs $pyinstallerArgs
 }
 

@@ -326,8 +326,13 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         return match.group(1).strip()
 
     def _set_window_icon(self):
-        icon_path = self.app_dir / "assets" / "app-icon" / "whisperdrop-icon.png"
-        if not icon_path.exists():
+        icon_paths = [self.app_dir / "assets" / "app-icon" / "whisperdrop-icon.png"]
+        bundle_dir = _bundle_dir()
+        if bundle_dir:
+            icon_paths.append(bundle_dir / "assets" / "app-icon" / "whisperdrop-icon.png")
+
+        icon_path = next((path for path in icon_paths if path.exists()), None)
+        if not icon_path:
             return
 
         try:
