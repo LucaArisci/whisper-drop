@@ -92,6 +92,116 @@ YOUTUBE_URL_PATTERN = re.compile(
 )
 
 
+def _is_frozen_app():
+    return bool(getattr(sys, "frozen", False))
+
+
+def _default_app_dir():
+    if _is_frozen_app():
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def _default_runtime_dir(app_dir):
+    if _is_frozen_app() and os.name == "nt":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            return Path(local_app_data) / "WhisperDrop"
+        return Path.home() / "AppData" / "Local" / "WhisperDrop"
+    return app_dir
+
+
+def _resolve_app_dirs():
+    app_dir = Path(os.environ.get("WHISPERDROP_APP_DIR", _default_app_dir())).expanduser().resolve()
+    runtime_dir = Path(os.environ.get("WHISPERDROP_RUNTIME_DIR", _default_runtime_dir(app_dir))).expanduser().resolve()
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    return app_dir, runtime_dir
+
+
+def _tool_roots(app_dir, runtime_dir):
+    roots = []
+    for base_dir in (runtime_dir, app_dir):
+        roots.extend(
+            [
+                base_dir / ".tools" / "ffmpeg" / "bin",
+                base_dir / ".tools" / "whisper.cpp" / "Release",
+                base_dir / ".tools" / "whisper.cpp" / "build" / "bin" / "Release",
+                base_dir / ".tools" / "whisper.cpp" / "build" / "bin",
+            ]
+        )
+
+    unique_roots = []
+    seen = set()
+    for root in roots:
+        normalized = str(root)
+        if normalized not in seen:
+            seen.add(normalized)
+            unique_roots.append(root)
+    return unique_roots
+
+
+def _find_binary_in_roots(names, roots):
+    if _is_frozen_app():
+        for root in roots:
+            for name in names:
+                candidate = root / (f"{name}.exe" if os.name == "nt" else name)
+                if candidate.exists():
+                    return str(candidate)
+
+    for name in names:
+        resolved = shutil.which(name)
+        if resolved:
+            return resolved
+
+    for root in roots:
+        for name in names:
+            candidate = root / (f"{name}.exe" if os.name == "nt" else name)
+            if candidate.exists():
+                return str(candidate)
+
+    return None
+
+
+def _has_yt_dlp_module():
+    try:
+        import yt_dlp  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _run_self_test():
+    app_dir, runtime_dir = _resolve_app_dirs()
+    checks = {
+        "app_dir": str(app_dir),
+        "runtime_dir": str(runtime_dir),
+        "frozen": _is_frozen_app(),
+        "python": sys.version.split()[0],
+        "tkinter": False,
+        "tkinterdnd2": False,
+        "yt_dlp": False,
+        "ffmpeg": None,
+        "whisper_cpp": None,
+    }
+
+    try:
+        import tkinter  # noqa: F401
+
+        checks["tkinter"] = True
+    except ImportError:
+        pass
+
+    checks["tkinterdnd2"] = HAS_DND
+    checks["yt_dlp"] = _has_yt_dlp_module()
+    roots = _tool_roots(app_dir, runtime_dir)
+    checks["ffmpeg"] = _find_binary_in_roots(("ffmpeg",), roots)
+    checks["whisper_cpp"] = _find_binary_in_roots(("whisper-cli", "whisper-cpp"), roots)
+
+    print(json.dumps(checks, indent=2))
+    required_ok = checks["tkinter"] and checks["yt_dlp"] and checks["ffmpeg"] and checks["whisper_cpp"]
+    return 0 if required_ok else 1
+
+
 class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
     def __init__(self):
         super().__init__()
@@ -99,18 +209,14 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self.configure(bg=BG)
         self.resizable(True, True)
 
-        source_dir = Path(__file__).resolve().parent
-        configured_app_dir = os.environ.get("WHISPERDROP_APP_DIR")
-        configured_runtime_dir = os.environ.get("WHISPERDROP_RUNTIME_DIR")
-        self.app_dir = Path(configured_app_dir).expanduser().resolve() if configured_app_dir else source_dir
-        self.runtime_dir = (
-            Path(configured_runtime_dir).expanduser().resolve() if configured_runtime_dir else self.app_dir
-        )
+        self.app_dir, self.runtime_dir = _resolve_app_dirs()
         self.model_dir = self.runtime_dir / ".models" / "whisper.cpp"
         self.download_dir = Path.home() / "Downloads" / "WhisperDrop"
         self.file_paths = []
         self.youtube_entries = []
         self.youtube_playlist_title = ""
+        self._window_icon = None
+        self._set_window_icon()
 
         self._scroll_top = 0.0
         self._scroll_bottom = 1.0
@@ -138,6 +244,17 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
     def _run_command(self, cmd):
         return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+    def _set_window_icon(self):
+        icon_path = self.app_dir / "assets" / "app-icon" / "whisperdrop-icon.png"
+        if not icon_path.exists():
+            return
+
+        try:
+            self._window_icon = tk.PhotoImage(file=str(icon_path))
+            self.iconphoto(True, self._window_icon)
+        except tk.TclError:
+            self._window_icon = None
 
     def _binary_dir(self, binary_path):
         return Path(binary_path).resolve().parent
@@ -237,7 +354,7 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         tk.Label(
             header,
-            text="WhisperDrop  🎙️",
+            text="WhisperDrop",
             font=(UI_FONT, 24, "bold"),
             bg=BG,
             fg=TEXT,
@@ -745,31 +862,33 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             self._ui(self._set_youtube_busy, False)
 
     def _list_youtube_entries(self, url):
-        yt_dlp = self._find_yt_dlp()
-        if not yt_dlp:
-            raise RuntimeError("yt-dlp was not found. Run setup again to install it.")
-
         self._ui(self._set_status, "Loading YouTube playlist...", "neutral")
         self._ui(self._log, f"Fetching playlist metadata: {url}")
 
-        result = self._run_command(
-            [
-                yt_dlp,
-                "--flat-playlist",
-                "--dump-single-json",
-                "--no-warnings",
-                "--no-color",
-                url,
-            ]
-        )
-        if result.returncode != 0:
-            error_output = result.stderr.strip() or result.stdout.strip() or "Unknown yt-dlp error."
-            raise RuntimeError(error_output)
+        payload = self._list_youtube_entries_with_module(url)
+        if payload is None:
+            yt_dlp = self._find_yt_dlp()
+            if not yt_dlp:
+                raise RuntimeError("yt-dlp was not found. Run setup again to install it.")
 
-        try:
-            payload = json.loads(result.stdout)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("yt-dlp returned invalid playlist metadata.") from exc
+            result = self._run_command(
+                [
+                    yt_dlp,
+                    "--flat-playlist",
+                    "--dump-single-json",
+                    "--no-warnings",
+                    "--no-color",
+                    url,
+                ]
+            )
+            if result.returncode != 0:
+                error_output = result.stderr.strip() or result.stdout.strip() or "Unknown yt-dlp error."
+                raise RuntimeError(error_output)
+
+            try:
+                payload = json.loads(result.stdout)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError("yt-dlp returned invalid playlist metadata.") from exc
 
         raw_entries = payload.get("entries") or [payload]
         playlist_title = payload.get("title") or payload.get("playlist_title") or "YouTube playlist"
@@ -801,19 +920,41 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         return entries, playlist_title
 
+    def _list_youtube_entries_with_module(self, url):
+        try:
+            import yt_dlp
+        except ImportError:
+            return None
+
+        options = {
+            "extract_flat": "in_playlist",
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": False,
+        }
+        try:
+            with yt_dlp.YoutubeDL(options) as downloader:
+                return downloader.extract_info(url, download=False)
+        except Exception as exc:
+            raise RuntimeError(str(exc)) from exc
+
     def _sanitize_folder_name(self, value):
         cleaned = re.sub(r'[<>:"/\\|?*]+', "-", value).strip(" .")
         return cleaned or "youtube-playlist"
 
     def _download_youtube_audio(self, entry, playlist_dir):
-        yt_dlp = self._find_yt_dlp()
-        if not yt_dlp:
-            raise RuntimeError("yt-dlp was not found. Run setup again to install it.")
-
         playlist_dir.mkdir(parents=True, exist_ok=True)
         output_template = str(playlist_dir / f"{entry['index']:03d} - %(title)s [%(id)s].%(ext)s")
 
         self._ui(self._log, f"Downloading audio: {entry['title']}")
+        module_download = self._download_youtube_audio_with_module(entry, output_template)
+        if module_download:
+            return module_download
+
+        yt_dlp = self._find_yt_dlp()
+        if not yt_dlp:
+            raise RuntimeError("yt-dlp was not found. Run setup again to install it.")
+
         result = self._run_command(
             [
                 yt_dlp,
@@ -822,9 +963,6 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
                 "--no-color",
                 "-f",
                 "bestaudio/best",
-                "-x",
-                "--audio-format",
-                "best",
                 "-o",
                 output_template,
                 entry["url"],
@@ -841,6 +979,37 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             raise RuntimeError("yt-dlp finished without creating the audio file.")
 
         return matches[0]
+
+    def _download_youtube_audio_with_module(self, entry, output_template):
+        try:
+            import yt_dlp
+        except ImportError:
+            return None
+
+        options = {
+            "format": "bestaudio/best",
+            "noplaylist": True,
+            "no_warnings": True,
+            "outtmpl": output_template,
+            "quiet": True,
+        }
+
+        try:
+            with yt_dlp.YoutubeDL(options) as downloader:
+                info = downloader.extract_info(entry["url"], download=True)
+        except Exception as exc:
+            raise RuntimeError(str(exc)) from exc
+
+        downloads = info.get("requested_downloads") or []
+        for item in downloads:
+            filepath = item.get("filepath")
+            if filepath and Path(filepath).exists():
+                return Path(filepath)
+
+        matches = sorted(Path(output_template).parent.glob(f"{entry['index']:03d} - * [{entry['id']}].*"))
+        if not matches:
+            matches = sorted(Path(output_template).parent.glob(f"{entry['index']:03d} - *"))
+        return matches[0] if matches else None
 
     def _set_youtube_busy(self, busy):
         state = "disabled" if busy else "normal"
@@ -942,16 +1111,12 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         return [entry for entry in result.stdout.split(os.pathsep) if entry]
 
     def _local_tool_roots(self):
-        roots = [
-            self.runtime_dir / ".tools" / "ffmpeg" / "bin",
-            self.runtime_dir / ".tools" / "whisper.cpp" / "Release",
-            self.runtime_dir / ".tools" / "whisper.cpp" / "build" / "bin" / "Release",
-            self.runtime_dir / ".tools" / "whisper.cpp" / "build" / "bin",
-        ]
-        return roots
+        return _tool_roots(self.app_dir, self.runtime_dir)
 
     def _find_binary(self, names):
         local_roots = self._local_tool_roots() if os.name in {"nt", "posix"} else []
+        if _is_frozen_app():
+            return _find_binary_in_roots(names, local_roots)
 
         search_roots = []
         seen_roots = set()
@@ -1314,6 +1479,9 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
 
 if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        raise SystemExit(_run_self_test())
+
     app = TranscriberApp()
     app.lift()
     app.attributes("-topmost", True)

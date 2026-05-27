@@ -33,6 +33,18 @@ The macOS app stores its runtime environment, downloaded tools, and model cache 
 
 If macOS blocks the app because it was downloaded from the internet, right-click `WhisperDrop.app`, choose **Open**, then confirm once.
 
+For Windows, build or download the packaged folder and run:
+
+```text
+dist/WhisperDrop/WhisperDrop.exe
+```
+
+The Windows app stores downloaded models in:
+
+```text
+%LOCALAPPDATA%\WhisperDrop
+```
+
 ## Requirements
 
 - macOS or Windows
@@ -83,6 +95,14 @@ powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1
 Or double-click `WhisperDrop_installer.bat`.
 
 The Windows setup installs Python 3.11 if needed, prepares a local virtual environment, installs `yt-dlp`, downloads or builds the required media tools, and prepares `whisper.cpp` with Vulkan support where possible.
+
+To create a packaged Windows app:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_exe.ps1 -Verify
+```
+
+This creates `dist\WhisperDrop\WhisperDrop.exe`. The build bundles the Python app and copies the local `.tools` runtime binaries when they are available.
 
 ## Usage
 
@@ -143,6 +163,7 @@ whisper-drop/
 |   `-- build_and_run.sh           # Build and launch helper for macOS app bundle
 |-- scripts/
 |   |-- build_macos_app.sh         # Creates dist/WhisperDrop.app
+|   |-- build_windows_exe.ps1      # Creates dist/WhisperDrop/WhisperDrop.exe
 |   |-- package_dmg.sh             # Creates build/package/WhisperDrop-<version>.dmg
 |   |-- setup.sh                   # macOS setup script
 |   |-- setup.ps1                  # Windows setup script
