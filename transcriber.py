@@ -197,6 +197,7 @@ def _run_self_test():
         "yt_dlp": False,
         "ffmpeg": None,
         "whisper_cpp": None,
+        "whisper_backend": None,
     }
 
     try:
@@ -210,7 +211,12 @@ def _run_self_test():
     checks["yt_dlp"] = _has_yt_dlp_module()
     roots = _tool_roots(app_dir, runtime_dir)
     checks["ffmpeg"] = _find_binary_in_roots(("ffmpeg",), roots)
-    checks["whisper_cpp"] = _find_binary_in_roots(("whisper-cli", "whisper-cpp"), roots)
+    app_probe = object.__new__(TranscriberApp)
+    app_probe.app_dir = app_dir
+    app_probe.runtime_dir = runtime_dir
+    checks["whisper_cpp"] = app_probe._find_whisper_cpp()
+    if checks["whisper_cpp"]:
+        checks["whisper_backend"] = app_probe._detect_whisper_backend(checks["whisper_cpp"])
 
     print(json.dumps(checks, indent=2))
     required_ok = checks["tkinter"] and checks["yt_dlp"] and checks["ffmpeg"] and checks["whisper_cpp"]
@@ -1198,11 +1204,7 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
     def _local_tool_roots(self):
         return _tool_roots(self.app_dir, self.runtime_dir)
 
-    def _find_binary(self, names):
-        local_roots = self._local_tool_roots() if os.name in {"nt", "posix"} else []
-        if _is_frozen_app():
-            return _find_binary_in_roots(names, local_roots)
-
+    def _path_search_roots(self):
         search_roots = []
         seen_roots = set()
         for raw_path in self._get_shell_path_entries() + os.environ.get("PATH", "").split(os.pathsep):
@@ -1214,6 +1216,57 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
                 continue
             seen_roots.add(normalized)
             search_roots.append(path_obj)
+
+        return search_roots
+
+    def _binary_names_for_platform(self, names):
+        for name in names:
+            if os.name == "nt" and not name.lower().endswith(".exe"):
+                yield f"{name}.exe"
+            else:
+                yield name
+
+    def _iter_binary_candidates(self, names, roots, include_path=True):
+        seen = set()
+
+        def emit(candidate):
+            try:
+                normalized = str(candidate.resolve())
+            except OSError:
+                normalized = str(candidate)
+            if normalized in seen or not candidate.exists():
+                return None
+            seen.add(normalized)
+            return str(candidate)
+
+        for root in roots:
+            for binary_name in self._binary_names_for_platform(names):
+                candidate = emit(root / binary_name)
+                if candidate:
+                    yield candidate
+
+        if not include_path:
+            return
+
+        for name in names:
+            resolved = shutil.which(name)
+            if resolved:
+                candidate = emit(Path(resolved))
+                if candidate:
+                    yield candidate
+
+        for prefix in self._path_search_roots():
+            for binary_name in self._binary_names_for_platform(names):
+                candidate = emit(prefix / binary_name)
+                if candidate:
+                    yield candidate
+
+    def _find_binary(self, names):
+        local_roots = self._local_tool_roots() if os.name in {"nt", "posix"} else []
+        if _is_frozen_app():
+            return _find_binary_in_roots(names, local_roots)
+
+        search_roots = self._path_search_roots()
 
         for name in names:
             resolved = shutil.which(name)
@@ -1233,6 +1286,22 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
                     return str(candidate)
 
         return None
+
+    def _find_whisper_cpp(self):
+        local_roots = self._local_tool_roots() if os.name in {"nt", "posix"} else []
+        candidates = []
+        for candidate in self._iter_binary_candidates(("whisper-cli", "whisper-cpp"), local_roots):
+            candidates.append((candidate, self._detect_whisper_backend(candidate)))
+
+        if not candidates:
+            return None
+
+        for preferred_backend in ("vulkan", "metal", "cpu"):
+            for candidate, backend in candidates:
+                if backend == preferred_backend:
+                    return candidate
+
+        return candidates[0][0]
 
     def _ggml_search_dirs(self, binary_dir):
         search_dirs = [binary_dir]
@@ -1275,8 +1344,9 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
     def _detect_whisper_backend(self, whisper_cpp):
         binary_dir = self._binary_dir(whisper_cpp)
         if os.name == "nt":
-            if (binary_dir / "ggml-vulkan.dll").exists():
-                return "vulkan"
+            for search_dir in self._ggml_search_dirs(binary_dir):
+                if (search_dir / "ggml-vulkan.dll").exists():
+                    return "vulkan"
             return "cpu"
 
         if sys.platform == "darwin" and self._has_metal_backend(binary_dir):
@@ -1451,7 +1521,7 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         return True
 
     def _run_whisper_cpp(self, source_path, audio_path, model_name, model_path, language):
-        whisper_cpp = self._find_binary(("whisper-cli", "whisper-cpp"))
+        whisper_cpp = self._find_whisper_cpp()
         if not whisper_cpp:
             raise RuntimeError("whisper.cpp was not found. Run setup again to install it.")
 
