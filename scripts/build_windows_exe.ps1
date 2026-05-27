@@ -158,6 +158,21 @@ function Copy-ReleaseTools {
     }
 }
 
+function New-ReleaseLauncher {
+    $launcherPath = Join-Path $AppDist "Start-WhisperDrop.bat"
+    $launcher = @'
+@echo off
+setlocal
+cd /d "%~dp0"
+
+echo Preparing WhisperDrop for first launch...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$root = [IO.Path]::GetFullPath('%~dp0'); Get-ChildItem -LiteralPath $root -Recurse -Force | Unblock-File -ErrorAction SilentlyContinue"
+
+start "" "%~dp0WhisperDrop.exe"
+'@
+    $launcher | Set-Content -LiteralPath $launcherPath -Encoding ASCII
+}
+
 Write-Section "$AppName - Windows EXE Build"
 Ensure-Venv
 Ensure-BuildPackages
@@ -203,11 +218,13 @@ if (Test-Path (Join-Path $RootDir "assets")) {
 }
 
 Copy-ReleaseTools
+New-ReleaseLauncher
 
 $releaseInfo = @"
 WhisperDrop $Version
 
-Run WhisperDrop.exe to open the app.
+Run Start-WhisperDrop.bat the first time after extracting the zip. It unblocks downloaded runtime DLLs, then opens WhisperDrop.exe.
+After the first successful launch, you can run WhisperDrop.exe directly.
 Models are downloaded on first use and cached in %LOCALAPPDATA%\WhisperDrop\.models.
 YouTube downloads and transcripts are saved under the user's Downloads\WhisperDrop folder.
 "@
