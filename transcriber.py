@@ -91,6 +91,9 @@ YOUTUBE_URL_PATTERN = re.compile(
     r"^https?://(?:www\.|music\.)?(?:youtube\.com/(?:watch\?[^#]*?v=|playlist\?|shorts/)|youtu\.be/)[^\s]+$",
     re.IGNORECASE,
 )
+WHISPER_SEGMENT_PATTERN = re.compile(
+    r"^\s*\[\d{2}:\d{2}:\d{2}\.\d{3}\s+-->\s+\d{2}:\d{2}:\d{2}\.\d{3}\]\s+(.+?)\s*$"
+)
 
 
 def _is_frozen_app():
@@ -270,6 +273,46 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             result = subprocess.CompletedProcess(cmd, -9, stdout=stdout, stderr=stderr)
             result.timed_out = True
             return result
+
+    def _run_command_stream(self, cmd, cwd=None, log_filter=None):
+        kwargs = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.STDOUT,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "bufsize": 1,
+            "cwd": cwd,
+        }
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+        output_lines = []
+        try:
+            with subprocess.Popen(cmd, **kwargs) as process:
+                if process.stdout:
+                    for line in iter(process.stdout.readline, ""):
+                        message = line.rstrip()
+                        if not message:
+                            continue
+                        output_lines.append(message)
+                        if log_filter:
+                            message = log_filter(message)
+                            if not message:
+                                continue
+                        self._ui(self._log, message)
+                return_code = process.wait()
+        except OSError as exc:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr=str(exc))
+
+        return subprocess.CompletedProcess(cmd, return_code, stdout="\n".join(output_lines), stderr="")
+
+    def _transcript_log_line(self, message):
+        match = WHISPER_SEGMENT_PATTERN.match(message)
+        if not match:
+            return None
+        return match.group(1).strip()
 
     def _set_window_icon(self):
         icon_path = self.app_dir / "assets" / "app-icon" / "whisperdrop-icon.png"
@@ -1415,19 +1458,24 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             "--output-file",
             str(output_base),
             "--output-txt",
+            "--no-prints",
         ]
 
         self._ui(self._set_status, f"Transcribing with {model_name}...", "neutral")
         backend_label = self._backend_label(backend)
         self._ui(self._log, f"Starting whisper.cpp with {backend_label} backend.")
         run_cmd = cmd + ["--no-gpu"] if backend == "cpu-fallback" else cmd
-        result = self._run_command(run_cmd, cwd=self._binary_dir(whisper_cpp))
+        result = self._run_command_stream(run_cmd, cwd=self._binary_dir(whisper_cpp), log_filter=self._transcript_log_line)
 
         if result.returncode != 0:
             if backend in {"vulkan", "metal"}:
                 self._ui(self._log, f"{backend_label} backend failed. Retrying on CPU...")
                 cpu_cmd = cmd + ["--no-gpu"]
-                cpu_result = self._run_command(cpu_cmd, cwd=self._binary_dir(whisper_cpp))
+                cpu_result = self._run_command_stream(
+                    cpu_cmd,
+                    cwd=self._binary_dir(whisper_cpp),
+                    log_filter=self._transcript_log_line,
+                )
                 if cpu_result.returncode == 0:
                     result = cpu_result
                     backend = "cpu-fallback"
@@ -1444,10 +1492,6 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
                 output_file = matches[0]
             else:
                 raise RuntimeError("whisper.cpp finished without creating the transcript file.")
-
-        cli_output = (result.stdout or result.stderr or "").strip()
-        if cli_output:
-            self._ui(self._log, cli_output)
 
         if backend == "cpu-fallback":
             self._ui(self._log, "Transcription completed on CPU fallback.")
