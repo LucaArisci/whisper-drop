@@ -3,6 +3,19 @@
  
 # Downloaded GGML models
 .models/
+
+# Downloaded YouTube audio files
+.downloads/
+
+# Build and release outputs
+dist/
+build/
+
+# Local Codex app config
+.codex/
+
+# Local Windows helper tools/builds
+.tools/
  
 # Python cache
 __pycache__/

@@ -1,0 +1,118 @@
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from transcriber import TranscriberApp
+
+
+class WindowGeometryTests(unittest.TestCase):
+    def test_windows_geometry_fits_small_work_area(self):
+        target_w, target_h, min_w, min_h = TranscriberApp._calculate_window_geometry(640, 480, True)
+
+        self.assertLessEqual(target_w, 640)
+        self.assertLessEqual(target_h, 480)
+        self.assertLessEqual(min_w, target_w)
+        self.assertLessEqual(min_h, target_h)
+
+    def test_windows_geometry_allows_very_small_work_area(self):
+        target_w, target_h, min_w, min_h = TranscriberApp._calculate_window_geometry(480, 320, True)
+
+        self.assertLessEqual(target_w, 480)
+        self.assertLessEqual(target_h, 320)
+        self.assertLessEqual(min_w, target_w)
+        self.assertLessEqual(min_h, target_h)
+
+
+@unittest.skipUnless(os.name == "nt", "Vulkan backend selection is Windows-specific")
+class WhisperGpuSelectionTests(unittest.TestCase):
+    def _app_for(self, root):
+        app = object.__new__(TranscriberApp)
+        app.app_dir = root / "app"
+        app.runtime_dir = root / "runtime"
+        app.app_dir.mkdir(parents=True)
+        app.runtime_dir.mkdir(parents=True)
+        return app
+
+    def _write_whisper(self, directory, has_vulkan=False):
+        directory.mkdir(parents=True, exist_ok=True)
+        whisper = directory / "whisper-cli.exe"
+        whisper.write_text("", encoding="utf-8")
+        if has_vulkan:
+            (directory / "ggml-vulkan.dll").write_text("", encoding="utf-8")
+        return whisper
+
+    def test_prefers_local_vulkan_over_path_cpu(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app = self._app_for(root)
+            local_dir = app.runtime_dir / ".tools" / "whisper.cpp" / "build" / "bin" / "Release"
+            path_dir = root / "path-cpu"
+            local_whisper = self._write_whisper(local_dir, has_vulkan=True)
+            self._write_whisper(path_dir, has_vulkan=False)
+
+            with patch.dict(os.environ, {"PATH": str(path_dir)}):
+                self.assertEqual(Path(app._find_whisper_cpp()).resolve(), local_whisper.resolve())
+
+    def test_prefers_path_vulkan_over_local_cpu(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app = self._app_for(root)
+            local_dir = app.runtime_dir / ".tools" / "whisper.cpp" / "build" / "bin" / "Release"
+            path_dir = root / "path-vulkan"
+            self._write_whisper(local_dir, has_vulkan=False)
+            path_whisper = self._write_whisper(path_dir, has_vulkan=True)
+
+            with patch.dict(os.environ, {"PATH": str(path_dir)}):
+                self.assertEqual(Path(app._find_whisper_cpp()).resolve(), path_whisper.resolve())
+
+
+class WhisperFlashAttnTests(unittest.TestCase):
+    def _app(self):
+        return object.__new__(TranscriberApp)
+
+    def test_vulkan_disables_flash_attn_by_default(self):
+        app = self._app()
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("WHISPERDROP_VULKAN_FLASH_ATTN", None)
+            self.assertIn("--no-flash-attn", app._backend_extra_args("vulkan"))
+
+    def test_vulkan_flash_attn_opt_in(self):
+        app = self._app()
+        with patch.dict(os.environ, {"WHISPERDROP_VULKAN_FLASH_ATTN": "1"}):
+            self.assertEqual(app._backend_extra_args("vulkan"), [])
+
+    def test_cpu_keeps_default_flash_attn(self):
+        app = self._app()
+        self.assertEqual(app._backend_extra_args("cpu"), [])
+
+    def test_metal_keeps_default_flash_attn(self):
+        app = self._app()
+        self.assertEqual(app._backend_extra_args("metal"), [])
+
+
+class WhisperErrorSummaryTests(unittest.TestCase):
+    def _app(self):
+        return object.__new__(TranscriberApp)
+
+    def test_picks_error_lines_over_device_banner(self):
+        app = self._app()
+        output = (
+            "ggml_vulkan: Found 1 Vulkan devices:\n"
+            "ggml_vulkan: 0 = NVIDIA GeForce RTX 4060\n"
+            "whisper_model_load: loading model\n"
+            "terminate called after throwing an instance of 'vk::DeviceLostError'\n"
+            "  what():  vk::Queue::submit: ErrorDeviceLost"
+        )
+        summary = app._summarize_whisper_error(output)
+        self.assertIn("DeviceLost", summary)
+        self.assertNotIn("Found 1 Vulkan devices", summary)
+
+    def test_handles_empty_output(self):
+        app = self._app()
+        self.assertEqual(app._summarize_whisper_error(""), "Unknown whisper.cpp error.")
+
+
+if __name__ == "__main__":
+    unittest.main()

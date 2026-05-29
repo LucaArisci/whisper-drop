@@ -1,4 +1,7 @@
+import ctypes
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -7,8 +10,13 @@ import threading
 import tkinter as tk
 import urllib.error
 import urllib.request
+import wave
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from urllib.parse import urlparse
+
+if os.name == "nt":
+    from ctypes import wintypes
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -67,25 +75,175 @@ GREEN_DARK = "#1ea954"
 GREEN_SOFT = "#0d2014"
 RED = "#ff6b6b"
 RED_SOFT = "#2a0d0d"
-UI_FONT = ".AppleSystemUIFont" if os.name == "posix" and "darwin" in sys.platform else "Helvetica"
-MONO_FONT = "SF Mono" if os.name == "posix" and "darwin" in sys.platform else "Menlo"
+if sys.platform == "darwin":
+    UI_FONT = ".AppleSystemUIFont"
+    MONO_FONT = "SF Mono"
+elif os.name == "nt":
+    UI_FONT = "Segoe UI"
+    MONO_FONT = "Consolas"
+else:
+    UI_FONT = "Helvetica"
+    MONO_FONT = "Menlo"
 
 SCROLLBAR_WIDTH = 10
 THUMB_MIN_HEIGHT = 30
+WINDOW_EDGE_GAP = 24
+WINDOW_MIN_WIDTH = 420
+WINDOW_MIN_HEIGHT = 300
+WINDOW_COMPACT_WIDTH = 900
+WINDOW_NARROW_OPTIONS_WIDTH = 640
+YOUTUBE_URL_PATTERN = re.compile(
+    r"^https?://(?:www\.|music\.)?(?:youtube\.com/(?:watch\?[^#]*?v=|playlist\?|shorts/)|youtu\.be/)[^\s]+$",
+    re.IGNORECASE,
+)
+WHISPER_SEGMENT_PATTERN = re.compile(
+    r"^\s*\[\d{2}:\d{2}:\d{2}\.\d{3}\s+-->\s+\d{2}:\d{2}:\d{2}\.\d{3}\]\s+(.+?)\s*$"
+)
+
+
+def _is_frozen_app():
+    return bool(getattr(sys, "frozen", False))
+
+
+def _default_app_dir():
+    if _is_frozen_app():
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def _bundle_dir():
+    if _is_frozen_app() and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS).resolve()
+    return None
+
+
+def _default_runtime_dir(app_dir):
+    if _is_frozen_app() and os.name == "nt":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            return Path(local_app_data) / "WhisperDrop"
+        return Path.home() / "AppData" / "Local" / "WhisperDrop"
+    return app_dir
+
+
+def _resolve_app_dirs():
+    app_dir = Path(os.environ.get("WHISPERDROP_APP_DIR", _default_app_dir())).expanduser().resolve()
+    runtime_dir = Path(os.environ.get("WHISPERDROP_RUNTIME_DIR", _default_runtime_dir(app_dir))).expanduser().resolve()
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    return app_dir, runtime_dir
+
+
+def _tool_roots(app_dir, runtime_dir):
+    roots = []
+    base_dirs = [runtime_dir, app_dir]
+    bundle_dir = _bundle_dir()
+    if bundle_dir:
+        base_dirs.append(bundle_dir)
+
+    for base_dir in base_dirs:
+        roots.extend(
+            [
+                base_dir / ".tools" / "ffmpeg" / "bin",
+                base_dir / ".tools" / "whisper.cpp" / "Release",
+                base_dir / ".tools" / "whisper.cpp" / "build" / "bin" / "Release",
+                base_dir / ".tools" / "whisper.cpp" / "build" / "bin",
+            ]
+        )
+
+    unique_roots = []
+    seen = set()
+    for root in roots:
+        normalized = str(root)
+        if normalized not in seen:
+            seen.add(normalized)
+            unique_roots.append(root)
+    return unique_roots
+
+
+def _find_binary_in_roots(names, roots):
+    if _is_frozen_app():
+        for root in roots:
+            for name in names:
+                candidate = root / (f"{name}.exe" if os.name == "nt" else name)
+                if candidate.exists():
+                    return str(candidate)
+
+    for name in names:
+        resolved = shutil.which(name)
+        if resolved:
+            return resolved
+
+    for root in roots:
+        for name in names:
+            candidate = root / (f"{name}.exe" if os.name == "nt" else name)
+            if candidate.exists():
+                return str(candidate)
+
+    return None
+
+
+def _has_yt_dlp_module():
+    try:
+        import yt_dlp  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _run_self_test():
+    app_dir, runtime_dir = _resolve_app_dirs()
+    checks = {
+        "app_dir": str(app_dir),
+        "runtime_dir": str(runtime_dir),
+        "frozen": _is_frozen_app(),
+        "python": sys.version.split()[0],
+        "tkinter": False,
+        "tkinterdnd2": False,
+        "yt_dlp": False,
+        "ffmpeg": None,
+        "whisper_cpp": None,
+        "whisper_backend": None,
+    }
+
+    try:
+        import tkinter  # noqa: F401
+
+        checks["tkinter"] = True
+    except ImportError:
+        pass
+
+    checks["tkinterdnd2"] = HAS_DND
+    checks["yt_dlp"] = _has_yt_dlp_module()
+    roots = _tool_roots(app_dir, runtime_dir)
+    checks["ffmpeg"] = _find_binary_in_roots(("ffmpeg",), roots)
+    app_probe = object.__new__(TranscriberApp)
+    app_probe.app_dir = app_dir
+    app_probe.runtime_dir = runtime_dir
+    checks["whisper_cpp"] = app_probe._find_whisper_cpp()
+    if checks["whisper_cpp"]:
+        checks["whisper_backend"] = app_probe._detect_whisper_backend(checks["whisper_cpp"])
+
+    print(json.dumps(checks, indent=2))
+    required_ok = checks["tkinter"] and checks["yt_dlp"] and checks["ffmpeg"] and checks["whisper_cpp"]
+    return 0 if required_ok else 1
 
 
 class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("WhisperDrop")
-        self.geometry("1200x780")
-        self.minsize(900, 620)
         self.configure(bg=BG)
+        self.resizable(True, True)
 
-        self.app_dir = Path(__file__).resolve().parent
-        self.model_dir = self.app_dir / ".models" / "whisper.cpp"
-        self.file_path = None
-        self.output_dir = None
+        self.app_dir, self.runtime_dir = _resolve_app_dirs()
+        self.model_dir = self.runtime_dir / ".models" / "whisper.cpp"
+        self.download_dir = Path.home() / "Downloads" / "WhisperDrop"
+        self.file_paths = []
+        self.youtube_entries = []
+        self.youtube_playlist_title = ""
+        self._gpu_probe_results = {}
+        self._window_icon = None
+        self._set_window_icon()
 
         self._scroll_top = 0.0
         self._scroll_bottom = 1.0
@@ -93,15 +251,176 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self._scroll_drag_start_top = None
 
         default_model = "Turbo Q5"
-        self.file_var = tk.StringVar(value="No file selected")
-        self.file_help_var = tk.StringVar(value="Choose an audio or video file to create a text transcript.")
+        self.file_var = tk.StringVar(value="No files selected")
+        self.file_help_var = tk.StringVar(value="Choose one or more audio or video files to create text transcripts.")
         self.status_var = tk.StringVar(value="Ready")
         self.lang_var = tk.StringVar(value="Italian")
         self.model_var = tk.StringVar(value=default_model)
         self.model_help_var = tk.StringVar(value=MODELS[default_model]["description"])
+        self.youtube_url_var = tk.StringVar(value="")
+        self.youtube_help_var = tk.StringVar(
+            value="Paste a YouTube playlist or video link, then load it into the queue."
+        )
 
+        self._configure_window_size()
         self._build_ui()
+        self._fit_window_to_content()
+        self.after(75, self._fit_window_to_content)
+        self.after(250, self._fit_window_to_content)
         self._bind_shortcuts()
+
+    def _run_command(self, cmd, timeout=None, cwd=None):
+        kwargs = {
+            "stdin": subprocess.DEVNULL,
+            "capture_output": True,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "timeout": timeout,
+            "cwd": cwd,
+        }
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+        try:
+            return subprocess.run(cmd, **kwargs)
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout or ""
+            stderr = exc.stderr or ""
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode("utf-8", errors="replace")
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode("utf-8", errors="replace")
+
+            result = subprocess.CompletedProcess(cmd, -9, stdout=stdout, stderr=stderr)
+            result.timed_out = True
+            return result
+
+    def _run_command_stream(self, cmd, cwd=None, log_filter=None):
+        kwargs = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.STDOUT,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "bufsize": 1,
+            "cwd": cwd,
+        }
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+        output_lines = []
+        try:
+            with subprocess.Popen(cmd, **kwargs) as process:
+                if process.stdout:
+                    for line in iter(process.stdout.readline, ""):
+                        message = line.rstrip()
+                        if not message:
+                            continue
+                        output_lines.append(message)
+                        if log_filter:
+                            message = log_filter(message)
+                            if not message:
+                                continue
+                        self._ui(self._log, message)
+                return_code = process.wait()
+        except OSError as exc:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr=str(exc))
+
+        return subprocess.CompletedProcess(cmd, return_code, stdout="\n".join(output_lines), stderr="")
+
+    def _transcript_log_line(self, message):
+        match = WHISPER_SEGMENT_PATTERN.match(message)
+        if not match:
+            return None
+        return match.group(1).strip()
+
+    def _set_window_icon(self):
+        icon_paths = [self.app_dir / "assets" / "app-icon" / "whisperdrop-icon.png"]
+        bundle_dir = _bundle_dir()
+        if bundle_dir:
+            icon_paths.append(bundle_dir / "assets" / "app-icon" / "whisperdrop-icon.png")
+
+        icon_path = next((path for path in icon_paths if path.exists()), None)
+        if not icon_path:
+            return
+
+        try:
+            self._window_icon = tk.PhotoImage(file=str(icon_path))
+            self.iconphoto(True, self._window_icon)
+        except tk.TclError:
+            self._window_icon = None
+
+    def _binary_dir(self, binary_path):
+        return Path(binary_path).resolve().parent
+
+    def _get_work_area(self):
+        if os.name == "nt":
+            rect = wintypes.RECT()
+            if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
+                return rect.right - rect.left, rect.bottom - rect.top
+        return self.winfo_screenwidth(), self.winfo_screenheight()
+
+    @staticmethod
+    def _calculate_window_geometry(work_w, work_h, is_windows):
+        work_w = max(1, int(work_w))
+        work_h = max(1, int(work_h))
+        edge_gap = WINDOW_EDGE_GAP if is_windows else 16
+        max_w = max(1, work_w - edge_gap)
+        max_h = max(1, work_h - edge_gap)
+
+        if is_windows:
+            preferred_w = min(1280, max(980, work_w - 120))
+            preferred_h = min(900, max(760, work_h - 120))
+            minimum_w = min(max_w, max(WINDOW_MIN_WIDTH, work_w - 80))
+            minimum_h = min(max_h, max(WINDOW_MIN_HEIGHT, work_h - 80))
+        else:
+            preferred_w = min(1280, max(960, work_w - 48))
+            preferred_h = min(920, max(720, work_h - 36))
+            minimum_w = min(max_w, max(WINDOW_MIN_WIDTH, work_w - 64))
+            minimum_h = min(max_h, max(WINDOW_MIN_HEIGHT, work_h - 64))
+
+        target_w = min(max_w, max(minimum_w, preferred_w))
+        target_h = min(max_h, max(minimum_h, preferred_h))
+        minimum_w = min(minimum_w, target_w)
+        minimum_h = min(minimum_h, target_h)
+
+        return target_w, target_h, minimum_w, minimum_h
+
+    def _configure_window_size(self):
+        work_w, work_h = self._get_work_area()
+        target_w, target_h, min_w, min_h = self._calculate_window_geometry(work_w, work_h, os.name == "nt")
+        self._base_min_width = min_w
+        self._base_min_height = min_h
+        pos_x = max(0, (work_w - target_w) // 2)
+        pos_y = max(0, (work_h - target_h) // 2)
+
+        self.geometry(f"{target_w}x{target_h}+{pos_x}+{pos_y}")
+        self.minsize(min_w, min_h)
+
+    def _fit_window_to_content(self):
+        self.update_idletasks()
+
+        work_w, work_h = self._get_work_area()
+        current_w = self.winfo_width()
+        current_h = self.winfo_height()
+        required_w = self.winfo_reqwidth()
+        required_h = self.winfo_reqheight()
+        max_w = max(1, work_w - WINDOW_EDGE_GAP)
+        max_h = max(1, work_h - WINDOW_EDGE_GAP)
+
+        if os.name == "nt":
+            target_w = min(max_w, max(current_w, self._base_min_width, required_w + 24))
+            target_h = min(max_h, max(current_h, self._base_min_height, required_h + 24))
+        else:
+            target_w = min(max_w, max(current_w, required_w))
+            target_h = min(max_h, max(current_h, required_h))
+        pos_x = max(0, (work_w - target_w) // 2)
+        pos_y = max(0, (work_h - target_h) // 2)
+
+        self.geometry(f"{target_w}x{target_h}+{pos_x}+{pos_y}")
+        self.minsize(self._base_min_width, self._base_min_height)
 
     def _build_ui(self):
         style = ttk.Style()
@@ -135,8 +454,20 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        root = tk.Frame(self, bg=BG, padx=28, pady=24)
-        root.grid(sticky="nsew")
+        self._main_canvas = tk.Canvas(self, bg=BG, highlightthickness=0, bd=0)
+        self._main_canvas.grid(row=0, column=0, sticky="nsew")
+        self._main_scrollbar = ttk.Scrollbar(self, orient="vertical", command=self._main_canvas.yview)
+        self._main_scrollbar.grid(row=0, column=1, sticky="ns")
+        self._main_canvas.configure(yscrollcommand=self._main_scrollbar.set)
+
+        root = tk.Frame(self._main_canvas, bg=BG, padx=28, pady=24)
+        self._content_root = root
+        self._content_window = self._main_canvas.create_window((0, 0), window=root, anchor="nw")
+        self._main_canvas.bind("<Configure>", self._on_main_canvas_configure)
+        root.bind("<Configure>", self._on_main_content_configure)
+        self.bind_all("<MouseWheel>", self._on_main_mousewheel, add="+")
+        self.bind_all("<Button-4>", self._on_main_mousewheel, add="+")
+        self.bind_all("<Button-5>", self._on_main_mousewheel, add="+")
 
         root.grid_columnconfigure(0, weight=1, uniform="col")
         root.grid_columnconfigure(1, weight=1, uniform="col")
@@ -146,33 +477,35 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         root.grid_rowconfigure(3, weight=1)
 
         # ── Header ───────────────────────────────────────────────────────────
-        header = tk.Frame(root, bg=BG)
-        header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 18))
-        header.grid_columnconfigure(0, weight=1)
+        self._header = tk.Frame(root, bg=BG)
+        self._header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 18))
+        self._header.grid_columnconfigure(0, weight=1)
 
         tk.Label(
-            header,
-            text="WhisperDrop  🎙️",
+            self._header,
+            text="WhisperDrop",
             font=(UI_FONT, 24, "bold"),
             bg=BG,
             fg=TEXT,
         ).grid(row=0, column=0, sticky="w")
-        tk.Label(
-            header,
+        self._header_subtitle = tk.Label(
+            self._header,
             text="whisper.cpp backend with quantized GGML models for lower-end hardware.",
             font=(UI_FONT, 13),
             bg=BG,
             fg=MUTED,
-        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
-        tk.Frame(header, bg=GREEN, height=3, width=96).grid(row=2, column=0, sticky="w", pady=(14, 0))
+            justify="left",
+        )
+        self._header_subtitle.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        tk.Frame(self._header, bg=GREEN, height=3, width=96).grid(row=2, column=0, sticky="w", pady=(14, 0))
 
         # ── File card ─────────────────────────────────────────────────────────
-        file_card = tk.Frame(root, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
-        file_card.grid(row=1, column=0, sticky="ew", padx=(0, 10))
-        file_card.grid_columnconfigure(0, weight=1)
+        self._file_card = tk.Frame(root, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
+        self._file_card.grid(row=1, column=0, sticky="ew", padx=(0, 10))
+        self._file_card.grid_columnconfigure(0, weight=1)
 
         tk.Label(
-            file_card,
+            self._file_card,
             text="File",
             font=(UI_FONT, 15, "bold"),
             bg=CARD,
@@ -180,7 +513,7 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         ).grid(row=0, column=0, sticky="w", padx=18, pady=(16, 6))
 
         self.drop_zone = tk.Frame(
-            file_card,
+            self._file_card,
             bg=BG,
             highlightbackground=BORDER,
             highlightthickness=1,
@@ -198,7 +531,7 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         self.drop_title = tk.Label(
             self.drop_zone,
-            text="Drop file here ➕",
+            text="Drop files here ➕",
             font=(UI_FONT, 20, "bold"),
             bg=BG,
             fg=TEXT,
@@ -213,12 +546,18 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             fg=MUTED,
         )
         self.drop_subtitle.grid(row=1, column=0, sticky="n", pady=(0, 26))
+        self.drop_title.bind("<Button-1>", self._browse_file)
+        self.drop_subtitle.bind("<Button-1>", self._browse_file)
+        self.drop_title.bind("<Enter>", lambda _e: self._set_drop_zone_hover(True))
+        self.drop_subtitle.bind("<Enter>", lambda _e: self._set_drop_zone_hover(True))
+        self.drop_title.bind("<Leave>", lambda _e: self._set_drop_zone_hover(False))
+        self.drop_subtitle.bind("<Leave>", lambda _e: self._set_drop_zone_hover(False))
 
         if HAS_DND:
             self.drop_zone.drop_target_register(DND_FILES)
             self.drop_zone.dnd_bind("<<Drop>>", self._on_drop)
 
-        browse_row = tk.Frame(file_card, bg=CARD)
+        browse_row = tk.Frame(self._file_card, bg=CARD)
         browse_row.grid(row=2, column=0, sticky="ew", padx=18, pady=(14, 12))
         browse_row.grid_columnconfigure(0, weight=1)
 
@@ -233,7 +572,7 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         self.browse_btn = tk.Label(
             self.browse_btn_frame,
-            text="Browse File  📂",
+            text="Browse Files  📂",
             font=(UI_FONT, 13, "bold"),
             bg=GREEN_SOFT,
             fg=GREEN,
@@ -248,11 +587,11 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self.browse_btn.bind("<Enter>", lambda e: (self.browse_btn_frame.config(bg="#0f2e1a"), self.browse_btn.config(bg="#0f2e1a")))
         self.browse_btn.bind("<Leave>", lambda e: (self.browse_btn_frame.config(bg=GREEN_SOFT), self.browse_btn.config(bg=GREEN_SOFT)))
 
-        file_info = tk.Frame(file_card, bg=CARD)
+        file_info = tk.Frame(self._file_card, bg=CARD)
         file_info.grid(row=3, column=0, sticky="ew", padx=18, pady=(0, 18))
         file_info.grid_columnconfigure(0, weight=1)
 
-        tk.Label(
+        self.file_label = tk.Label(
             file_info,
             textvariable=self.file_var,
             font=(UI_FONT, 13, "bold"),
@@ -260,7 +599,8 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             fg=TEXT,
             anchor="w",
             justify="left",
-        ).grid(row=0, column=0, sticky="ew")
+        )
+        self.file_label.grid(row=0, column=0, sticky="ew")
         self.file_help_label = tk.Label(
             file_info,
             textvariable=self.file_help_var,
@@ -272,24 +612,95 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         )
         self.file_help_label.grid(row=1, column=0, sticky="ew", pady=(4, 0))
 
-        # ── Options ───────────────────────────────────────────────────────────
-        options = tk.Frame(root, bg=BG)
-        options.grid(row=2, column=0, sticky="ew", padx=(0, 10), pady=(18, 18))
-        options.grid_columnconfigure(0, weight=1)
-        options.grid_columnconfigure(1, weight=1)
-        options.grid_rowconfigure(0, weight=1)
+        youtube_section = tk.Frame(self._file_card, bg=CARD)
+        youtube_section.grid(row=4, column=0, sticky="ew", padx=18, pady=(0, 18))
+        youtube_section.grid_columnconfigure(0, weight=1)
 
-        lang_card = tk.Frame(options, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
-        lang_card.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         tk.Label(
-            lang_card,
+            youtube_section,
+            text="YouTube Playlist",
+            font=(UI_FONT, 15, "bold"),
+            bg=CARD,
+            fg=TEXT,
+        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+
+        self.youtube_entry = tk.Entry(
+            youtube_section,
+            textvariable=self.youtube_url_var,
+            font=(UI_FONT, 12),
+            bg=BG,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief="flat",
+            highlightbackground=BORDER,
+            highlightthickness=1,
+        )
+        self.youtube_entry.grid(row=1, column=0, sticky="ew", ipady=8)
+
+        youtube_btn_row = tk.Frame(youtube_section, bg=CARD)
+        youtube_btn_row.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+
+        self.youtube_btn_frame = tk.Frame(
+            youtube_btn_row,
+            bg=GREEN_SOFT,
+            highlightbackground=GREEN,
+            highlightthickness=1,
+            cursor="hand2",
+        )
+        self.youtube_btn_frame.pack(side="left")
+
+        self.youtube_btn = tk.Label(
+            self.youtube_btn_frame,
+            text="Load Playlist  ▶️",
+            font=(UI_FONT, 13, "bold"),
+            bg=GREEN_SOFT,
+            fg=GREEN,
+            padx=18,
+            pady=12,
+            cursor="hand2",
+        )
+        self.youtube_btn.pack()
+        self.youtube_btn.bind("<Button-1>", lambda _e: self._load_youtube_playlist())
+        self.youtube_btn_frame.bind("<Button-1>", lambda _e: self._load_youtube_playlist())
+        self.youtube_btn.bind(
+            "<Enter>",
+            lambda _e: (self.youtube_btn_frame.config(bg="#0f2e1a"), self.youtube_btn.config(bg="#0f2e1a")),
+        )
+        self.youtube_btn.bind(
+            "<Leave>",
+            lambda _e: (self.youtube_btn_frame.config(bg=GREEN_SOFT), self.youtube_btn.config(bg=GREEN_SOFT)),
+        )
+
+        self.youtube_help_label = tk.Label(
+            youtube_section,
+            textvariable=self.youtube_help_var,
+            font=(UI_FONT, 11),
+            bg=CARD,
+            fg=MUTED,
+            anchor="w",
+            justify="left",
+            wraplength=420,
+        )
+        self.youtube_help_label.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+
+        # ── Options ───────────────────────────────────────────────────────────
+        self._options_frame = tk.Frame(root, bg=BG)
+        self._options_frame.grid(row=2, column=0, sticky="ew", padx=(0, 10), pady=(18, 18))
+        self._options_frame.grid_columnconfigure(0, weight=1)
+        self._options_frame.grid_columnconfigure(1, weight=1)
+        self._options_frame.grid_rowconfigure(0, weight=1)
+
+        self._lang_card = tk.Frame(self._options_frame, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
+        self._lang_card.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        tk.Label(
+            self._lang_card,
             text="Language",
             font=(UI_FONT, 15, "bold"),
             bg=CARD,
             fg=TEXT,
         ).pack(anchor="w", padx=16, pady=(14, 6))
         self.lang_menu = ttk.Combobox(
-            lang_card,
+            self._lang_card,
             textvariable=self.lang_var,
             values=list(LANGUAGES.keys()),
             state="readonly",
@@ -298,17 +709,17 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         )
         self.lang_menu.pack(fill="x", padx=16, pady=(0, 14))
 
-        model_card = tk.Frame(options, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
-        model_card.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        self._model_card = tk.Frame(self._options_frame, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
+        self._model_card.grid(row=0, column=1, sticky="ew", padx=(8, 0))
         tk.Label(
-            model_card,
+            self._model_card,
             text="Model",
             font=(UI_FONT, 15, "bold"),
             bg=CARD,
             fg=TEXT,
         ).pack(anchor="w", padx=16, pady=(14, 6))
         self.model_menu = ttk.Combobox(
-            model_card,
+            self._model_card,
             textvariable=self.model_var,
             values=list(MODELS.keys()),
             state="readonly",
@@ -317,8 +728,8 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         )
         self.model_menu.pack(fill="x", padx=16, pady=(0, 8))
         self.model_menu.bind("<<ComboboxSelected>>", self._on_model_change)
-        tk.Label(
-            model_card,
+        self.model_help_label = tk.Label(
+            self._model_card,
             textvariable=self.model_help_var,
             font=(UI_FONT, 10),
             bg=CARD,
@@ -326,15 +737,16 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             wraplength=260,
             justify="left",
             anchor="w",
-        ).pack(fill="x", padx=16, pady=(0, 14))
+        )
+        self.model_help_label.pack(fill="x", padx=16, pady=(0, 14))
 
         # ── Action card ───────────────────────────────────────────────────────
-        action_card = tk.Frame(root, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
-        action_card.grid(row=3, column=0, sticky="nsew", padx=(0, 10))
-        action_card.grid_columnconfigure(0, weight=1)
+        self._action_card = tk.Frame(root, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
+        self._action_card.grid(row=3, column=0, sticky="nsew", padx=(0, 10))
+        self._action_card.grid_columnconfigure(0, weight=1)
 
         self.run_btn_frame = tk.Frame(
-            action_card,
+            self._action_card,
             bg=GREEN_SOFT,
             highlightbackground=GREEN,
             highlightthickness=1,
@@ -360,10 +772,10 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self.run_btn.bind("<Enter>", lambda e: (self.run_btn_frame.config(bg="#0f2e1a"), self.run_btn.config(bg="#0f2e1a")))
         self.run_btn.bind("<Leave>", lambda e: (self.run_btn_frame.config(bg=GREEN_SOFT), self.run_btn.config(bg=GREEN_SOFT)))
 
-        self.progress = ttk.Progressbar(action_card, mode="indeterminate", style="App.Horizontal.TProgressbar")
+        self.progress = ttk.Progressbar(self._action_card, mode="indeterminate", style="App.Horizontal.TProgressbar")
 
         self.status_label = tk.Label(
-            action_card,
+            self._action_card,
             textvariable=self.status_var,
             font=(UI_FONT, 11),
             bg=BG,
@@ -376,20 +788,20 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self.status_label.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 18))
 
         # ── Log card (right column, spans rows 1-3) ───────────────────────────
-        log_card = tk.Frame(root, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
-        log_card.grid(row=1, column=1, rowspan=3, sticky="nsew", padx=(10, 0))
-        log_card.grid_columnconfigure(0, weight=1)
-        log_card.grid_rowconfigure(1, weight=1)
+        self._log_card = tk.Frame(root, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
+        self._log_card.grid(row=1, column=1, rowspan=3, sticky="nsew", padx=(10, 0))
+        self._log_card.grid_columnconfigure(0, weight=1)
+        self._log_card.grid_rowconfigure(1, weight=1)
 
         tk.Label(
-            log_card,
+            self._log_card,
             text="Log",
             font=(UI_FONT, 15, "bold"),
             bg=CARD,
             fg=TEXT,
         ).grid(row=0, column=0, sticky="w", padx=18, pady=(16, 8))
 
-        log_frame = tk.Frame(log_card, bg=BG)
+        log_frame = tk.Frame(self._log_card, bg=BG)
         log_frame.grid(row=1, column=0, sticky="nsew", padx=18, pady=(0, 18))
         log_frame.grid_columnconfigure(0, weight=1)
         log_frame.grid_rowconfigure(0, weight=1)
@@ -434,6 +846,109 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self._set_drop_zone_hover(False)
         self._set_status("Ready", "neutral")
         self._log("Ready. whisper.cpp backend is active.")
+        self._log("You can load local files or paste a YouTube playlist link.")
+        self._apply_responsive_layout(self.winfo_width())
+
+    def _on_main_content_configure(self, _event=None):
+        bbox = self._main_canvas.bbox("all")
+        if bbox:
+            self._main_canvas.configure(scrollregion=bbox)
+        self._sync_main_scrollbar()
+
+    def _on_main_canvas_configure(self, event):
+        self._main_canvas.itemconfigure(self._content_window, width=event.width)
+        self._apply_responsive_layout(event.width)
+        self._sync_main_scrollbar()
+
+    def _sync_main_scrollbar(self):
+        bbox = self._main_canvas.bbox("all")
+        canvas_h = self._main_canvas.winfo_height()
+        content_h = 0 if not bbox else bbox[3] - bbox[1]
+        if content_h > canvas_h + 1:
+            if not self._main_scrollbar.winfo_ismapped():
+                self._main_scrollbar.grid(row=0, column=1, sticky="ns")
+        else:
+            if self._main_scrollbar.winfo_ismapped():
+                self._main_scrollbar.grid_remove()
+            self._main_canvas.yview_moveto(0)
+
+    def _on_main_mousewheel(self, event):
+        if self._is_descendant(event.widget, self.log) or self._is_descendant(event.widget, self._scroll_canvas):
+            return None
+        bbox = self._main_canvas.bbox("all")
+        if not bbox or bbox[3] - bbox[1] <= self._main_canvas.winfo_height() + 1:
+            return None
+        if getattr(event, "num", None) == 4:
+            delta = -1
+        elif getattr(event, "num", None) == 5:
+            delta = 1
+        else:
+            delta = -1 if event.delta > 0 else 1
+        self._main_canvas.yview_scroll(delta * 3, "units")
+        return "break"
+
+    def _is_descendant(self, widget, ancestor):
+        while widget is not None:
+            if widget == ancestor:
+                return True
+            widget = getattr(widget, "master", None)
+        return False
+
+    def _apply_responsive_layout(self, available_width):
+        if not hasattr(self, "_content_root"):
+            return
+
+        compact = available_width < WINDOW_COMPACT_WIDTH
+        narrow_options = available_width < WINDOW_NARROW_OPTIONS_WIDTH
+        pad = 10 if available_width < 520 else 16 if compact else 28
+        self._content_root.configure(padx=pad, pady=max(10, pad - 4))
+
+        if compact:
+            self._content_root.grid_columnconfigure(0, weight=1, uniform="")
+            self._content_root.grid_columnconfigure(1, weight=0, uniform="")
+            self._header.grid_configure(columnspan=1)
+            self._file_card.grid_configure(row=1, column=0, sticky="ew", padx=0)
+            self._options_frame.grid_configure(row=2, column=0, sticky="ew", padx=0, pady=(14, 14))
+            self._action_card.grid_configure(row=3, column=0, sticky="ew", padx=0)
+            self._log_card.grid_configure(row=4, column=0, rowspan=1, sticky="nsew", padx=0, pady=(14, 0))
+            self._content_root.grid_rowconfigure(3, weight=0)
+            self._content_root.grid_rowconfigure(4, weight=1)
+        else:
+            self._content_root.grid_columnconfigure(0, weight=1, uniform="col")
+            self._content_root.grid_columnconfigure(1, weight=1, uniform="col")
+            self._header.grid_configure(columnspan=2)
+            self._file_card.grid_configure(row=1, column=0, sticky="ew", padx=(0, 10))
+            self._options_frame.grid_configure(row=2, column=0, sticky="ew", padx=(0, 10), pady=(18, 18))
+            self._action_card.grid_configure(row=3, column=0, sticky="nsew", padx=(0, 10))
+            self._log_card.grid_configure(row=1, column=1, rowspan=3, sticky="nsew", padx=(10, 0), pady=0)
+            self._content_root.grid_rowconfigure(3, weight=1)
+            self._content_root.grid_rowconfigure(4, weight=0)
+
+        if narrow_options:
+            self._options_frame.grid_columnconfigure(0, weight=1)
+            self._options_frame.grid_columnconfigure(1, weight=0)
+            self._lang_card.grid_configure(row=0, column=0, sticky="ew", padx=0, pady=(0, 10))
+            self._model_card.grid_configure(row=1, column=0, sticky="ew", padx=0, pady=0)
+        else:
+            self._options_frame.grid_columnconfigure(0, weight=1)
+            self._options_frame.grid_columnconfigure(1, weight=1)
+            self._lang_card.grid_configure(row=0, column=0, sticky="nsew", padx=(0, 8), pady=0)
+            self._model_card.grid_configure(row=0, column=1, sticky="ew", padx=(8, 0), pady=0)
+
+        self._refresh_wraplengths(available_width, pad, compact)
+
+    def _refresh_wraplengths(self, available_width, pad, compact):
+        column_width = available_width - (pad * 2)
+        if not compact:
+            column_width = (available_width - (pad * 2) - 20) // 2
+        wrap = max(220, column_width - 56)
+
+        self._header_subtitle.configure(wraplength=max(240, available_width - (pad * 2)))
+        self.file_label.configure(wraplength=wrap)
+        self.file_help_label.configure(wraplength=wrap)
+        self.youtube_help_label.configure(wraplength=wrap)
+        self.model_help_label.configure(wraplength=wrap if compact else max(220, column_width - 48))
+        self.status_label.configure(wraplength=wrap)
 
     def _update_scrollbar(self, top, bottom):
         self._scroll_top = float(top)
@@ -496,31 +1011,309 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self.model_help_var.set(MODELS[self.model_var.get()]["description"])
 
     def _on_drop(self, event):
-        path = event.data.strip().strip("{}")
-        self._set_file(path)
+        entries = self.tk.splitlist(event.data)
+        if not entries:
+            return
+        self._set_files(entries)
 
     def _browse_file(self, event=None):
-        path = filedialog.askopenfilename(
-            title="Select audio or video file",
+        paths = filedialog.askopenfilenames(
+            parent=self,
+            title="Select audio or video files",
             filetypes=[("Audio and video", "*.mp3 *.wav *.m4a *.ogg *.flac *.opus *.webm *.mp4 *.aac")],
         )
-        if path:
-            self._set_file(path)
+        if paths:
+            self._set_files(paths)
 
-    def _set_file(self, path):
-        file_path = Path(path)
-        ext = file_path.suffix.lower()
-        if ext not in SUPPORTED:
-            messagebox.showerror("Unsupported file", f"Supported formats: {', '.join(sorted(SUPPORTED))}")
+    def _is_youtube_url(self, url):
+        url = url.strip()
+        if not url or not YOUTUBE_URL_PATTERN.match(url):
+            return False
+        host = urlparse(url).netloc.lower()
+        return host.endswith("youtube.com") or host == "youtu.be"
+
+    def _find_yt_dlp(self):
+        venv_name = "yt-dlp.exe" if os.name == "nt" else "yt-dlp"
+        venv_dir = "Scripts" if os.name == "nt" else "bin"
+        venv_ytdlp = self.runtime_dir / ".venv" / venv_dir / venv_name
+        if venv_ytdlp.exists():
+            return str(venv_ytdlp)
+        return self._find_binary(("yt-dlp",))
+
+    def _clear_youtube_queue(self):
+        self.youtube_entries = []
+        self.youtube_playlist_title = ""
+
+    def _clear_file_queue(self):
+        self.file_paths = []
+        self.file_var.set("No files selected")
+        self.file_help_var.set("Choose one or more audio or video files to create text transcripts.")
+        self.file_help_label.config(fg=MUTED)
+
+    def _set_youtube_queue(self, playlist_title, entries):
+        self._clear_file_queue()
+        self.youtube_playlist_title = playlist_title
+        self.youtube_entries = entries
+
+        if len(entries) == 1:
+            title = entries[0]["title"]
+            self.file_var.set(title)
+            self.file_help_var.set("YouTube video loaded. The transcript will be saved in Downloads/WhisperDrop.")
+        else:
+            preview_names = [entry["title"] for entry in entries[:3]]
+            preview = ", ".join(preview_names)
+            if len(entries) > 3:
+                preview += f", +{len(entries) - 3} more"
+            self.file_var.set(f"{len(entries)} YouTube videos loaded")
+            self.file_help_var.set(f"Playlist: {playlist_title}. Queue: {preview}")
+
+        self.file_help_label.config(fg=GREEN)
+        self.youtube_help_var.set(f"Loaded {len(entries)} item(s) from: {playlist_title}")
+        self.youtube_help_label.config(fg=GREEN)
+        self._set_status(f"{len(entries)} YouTube item(s) loaded. Ready to transcribe.", "success")
+        self._log(f"Loaded YouTube playlist: {playlist_title}")
+        for entry in entries:
+            self._log(f"  - {entry['index']:03d}. {entry['title']}")
+
+    def _load_youtube_playlist(self):
+        url = self.youtube_url_var.get().strip()
+        if not self._is_youtube_url(url):
+            messagebox.showerror("Invalid URL", "Paste a valid YouTube video or playlist link.")
             return
 
-        self.file_path = str(file_path)
-        self.output_dir = str(file_path.parent)
-        self.file_var.set(file_path.name)
-        self.file_help_var.set("Ready to transcribe with whisper.cpp. The text file will be saved next to the original file.")
+        self._set_youtube_busy(True)
+        threading.Thread(target=self._fetch_youtube_playlist, args=(url,), daemon=True).start()
+
+    def _fetch_youtube_playlist(self, url):
+        try:
+            entries, playlist_title = self._list_youtube_entries(url)
+            if not entries:
+                raise RuntimeError("No videos were found in that YouTube link.")
+            self._ui(self._set_youtube_queue, playlist_title, entries)
+        except Exception as exc:
+            self._ui(self._log, f"YouTube error:\n{exc}")
+            self._ui(self._set_status, "Could not load the YouTube playlist.", "error")
+            self._ui(lambda err=str(exc): messagebox.showerror("YouTube error", err))
+        finally:
+            self._ui(self._set_youtube_busy, False)
+
+    def _list_youtube_entries(self, url):
+        self._ui(self._set_status, "Loading YouTube playlist...", "neutral")
+        self._ui(self._log, f"Fetching playlist metadata: {url}")
+
+        payload = self._list_youtube_entries_with_module(url)
+        if payload is None:
+            yt_dlp = self._find_yt_dlp()
+            if not yt_dlp:
+                raise RuntimeError("yt-dlp was not found. Run setup again to install it.")
+
+            result = self._run_command(
+                [
+                    yt_dlp,
+                    "--flat-playlist",
+                    "--dump-single-json",
+                    "--no-warnings",
+                    "--no-color",
+                    url,
+                ]
+            )
+            if result.returncode != 0:
+                error_output = result.stderr.strip() or result.stdout.strip() or "Unknown yt-dlp error."
+                raise RuntimeError(error_output)
+
+            try:
+                payload = json.loads(result.stdout)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError("yt-dlp returned invalid playlist metadata.") from exc
+
+        raw_entries = payload.get("entries") or [payload]
+        playlist_title = payload.get("title") or payload.get("playlist_title") or "YouTube playlist"
+
+        entries = []
+        for index, item in enumerate(raw_entries, start=1):
+            if not item:
+                continue
+
+            video_id = item.get("id")
+            title = item.get("title") or f"Video {index}"
+            webpage_url = item.get("url") or item.get("webpage_url")
+            if webpage_url and not webpage_url.startswith("http"):
+                webpage_url = f"https://www.youtube.com/watch?v={webpage_url}"
+            elif video_id and not webpage_url:
+                webpage_url = f"https://www.youtube.com/watch?v={video_id}"
+
+            if not webpage_url:
+                continue
+
+            entries.append(
+                {
+                    "index": index,
+                    "id": video_id or f"item-{index}",
+                    "title": title,
+                    "url": webpage_url,
+                }
+            )
+
+        return entries, playlist_title
+
+    def _list_youtube_entries_with_module(self, url):
+        try:
+            import yt_dlp
+        except ImportError:
+            return None
+
+        options = {
+            "extract_flat": "in_playlist",
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": False,
+        }
+        try:
+            with yt_dlp.YoutubeDL(options) as downloader:
+                return downloader.extract_info(url, download=False)
+        except Exception as exc:
+            raise RuntimeError(str(exc)) from exc
+
+    def _sanitize_folder_name(self, value):
+        cleaned = re.sub(r'[<>:"/\\|?*]+', "-", value).strip(" .")
+        return cleaned or "youtube-playlist"
+
+    def _download_youtube_audio(self, entry, playlist_dir):
+        playlist_dir.mkdir(parents=True, exist_ok=True)
+        output_template = str(playlist_dir / f"{entry['index']:03d} - %(title)s [%(id)s].%(ext)s")
+
+        self._ui(self._log, f"Downloading audio: {entry['title']}")
+        module_download = self._download_youtube_audio_with_module(entry, output_template)
+        if module_download:
+            return module_download
+
+        yt_dlp = self._find_yt_dlp()
+        if not yt_dlp:
+            raise RuntimeError("yt-dlp was not found. Run setup again to install it.")
+
+        result = self._run_command(
+            [
+                yt_dlp,
+                "--no-playlist",
+                "--no-warnings",
+                "--no-color",
+                "-f",
+                "bestaudio/best",
+                "-o",
+                output_template,
+                entry["url"],
+            ]
+        )
+        if result.returncode != 0:
+            error_output = result.stderr.strip() or result.stdout.strip() or "Unknown yt-dlp error."
+            raise RuntimeError(error_output)
+
+        matches = sorted(playlist_dir.glob(f"{entry['index']:03d} - * [{entry['id']}].*"))
+        if not matches:
+            matches = sorted(playlist_dir.glob(f"{entry['index']:03d} - *"))
+        if not matches:
+            raise RuntimeError("yt-dlp finished without creating the audio file.")
+
+        return matches[0]
+
+    def _download_youtube_audio_with_module(self, entry, output_template):
+        try:
+            import yt_dlp
+        except ImportError:
+            return None
+
+        options = {
+            "format": "bestaudio/best",
+            "noplaylist": True,
+            "no_warnings": True,
+            "outtmpl": output_template,
+            "quiet": True,
+        }
+
+        try:
+            with yt_dlp.YoutubeDL(options) as downloader:
+                info = downloader.extract_info(entry["url"], download=True)
+        except Exception as exc:
+            raise RuntimeError(str(exc)) from exc
+
+        downloads = info.get("requested_downloads") or []
+        for item in downloads:
+            filepath = item.get("filepath")
+            if filepath and Path(filepath).exists():
+                return Path(filepath)
+
+        matches = sorted(Path(output_template).parent.glob(f"{entry['index']:03d} - * [{entry['id']}].*"))
+        if not matches:
+            matches = sorted(Path(output_template).parent.glob(f"{entry['index']:03d} - *"))
+        return matches[0] if matches else None
+
+    def _set_youtube_busy(self, busy):
+        state = "disabled" if busy else "normal"
+        self.youtube_entry.config(state=state)
+        if busy:
+            self.youtube_btn.config(text="Loading...  ⏳", fg=MUTED, cursor="")
+            self.youtube_btn_frame.config(cursor="")
+            self.youtube_btn.unbind("<Button-1>")
+            self.youtube_btn_frame.unbind("<Button-1>")
+        else:
+            self.youtube_btn.config(text="Load Playlist  ▶️", fg=GREEN, cursor="hand2")
+            self.youtube_btn_frame.config(cursor="hand2")
+            self.youtube_btn.bind("<Button-1>", lambda _e: self._load_youtube_playlist())
+            self.youtube_btn_frame.bind("<Button-1>", lambda _e: self._load_youtube_playlist())
+
+    def _set_files(self, paths):
+        valid_files = []
+        invalid_files = []
+        seen = set()
+
+        for path in paths:
+            file_path = Path(path)
+            ext = file_path.suffix.lower()
+            resolved = str(file_path)
+
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+
+            if ext not in SUPPORTED or not file_path.is_file():
+                invalid_files.append(file_path.name or resolved)
+                continue
+
+            valid_files.append(resolved)
+
+        if not valid_files:
+            messagebox.showerror("Unsupported files", f"Supported formats: {', '.join(sorted(SUPPORTED))}")
+            return
+
+        self._clear_youtube_queue()
+        self.youtube_url_var.set("")
+        self.youtube_help_var.set("Paste a YouTube playlist or video link, then load it into the queue.")
+        self.youtube_help_label.config(fg=MUTED)
+
+        self.file_paths = valid_files
+        if len(valid_files) == 1:
+            file_name = Path(valid_files[0]).name
+            self.file_var.set(file_name)
+            self.file_help_var.set("Ready to transcribe with whisper.cpp. The text file will be saved next to the original file.")
+            self._set_status("1 file selected. Ready to transcribe.", "success")
+        else:
+            preview_names = [Path(path).name for path in valid_files[:3]]
+            preview = ", ".join(preview_names)
+            if len(valid_files) > 3:
+                preview += f", +{len(valid_files) - 3} more"
+            self.file_var.set(f"{len(valid_files)} files selected")
+            self.file_help_var.set(f"Ready to transcribe {len(valid_files)} files. Queue: {preview}")
+            self._set_status(f"{len(valid_files)} files selected. Ready to transcribe.", "success")
+
         self.file_help_label.config(fg=GREEN)
-        self._set_status("File selected. Ready to transcribe.", "success")
-        self._log(f"Loaded: {file_path.name}")
+        self._log(f"Loaded {len(valid_files)} file(s).")
+        for path in valid_files:
+            self._log(f"  - {Path(path).name}")
+
+        if invalid_files:
+            self._log("Skipped unsupported entries:")
+            for name in invalid_files:
+                self._log(f"  - {name}")
 
     def _log(self, message):
         self.log.config(state="normal")
@@ -528,19 +1321,192 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self.log.see("end")
         self.log.config(state="disabled")
 
+    def _get_shell_path_entries(self):
+        if sys.platform != "darwin":
+            return []
+
+        shell = os.environ.get("SHELL") or shutil.which("zsh") or shutil.which("bash")
+        if not shell:
+            return []
+
+        try:
+            result = subprocess.run(
+                [shell, "-lc", 'printf %s "$PATH"'],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+        except OSError:
+            return []
+
+        if result.returncode != 0 or not result.stdout:
+            return []
+
+        return [entry for entry in result.stdout.split(os.pathsep) if entry]
+
+    def _local_tool_roots(self):
+        return _tool_roots(self.app_dir, self.runtime_dir)
+
+    def _path_search_roots(self):
+        search_roots = []
+        seen_roots = set()
+        for raw_path in self._get_shell_path_entries() + os.environ.get("PATH", "").split(os.pathsep):
+            if not raw_path:
+                continue
+            path_obj = Path(raw_path).expanduser()
+            normalized = str(path_obj)
+            if normalized in seen_roots or not path_obj.exists():
+                continue
+            seen_roots.add(normalized)
+            search_roots.append(path_obj)
+
+        return search_roots
+
+    def _binary_names_for_platform(self, names):
+        for name in names:
+            if os.name == "nt" and not name.lower().endswith(".exe"):
+                yield f"{name}.exe"
+            else:
+                yield name
+
+    def _iter_binary_candidates(self, names, roots, include_path=True):
+        seen = set()
+
+        def emit(candidate):
+            try:
+                normalized = str(candidate.resolve())
+            except OSError:
+                normalized = str(candidate)
+            if normalized in seen or not candidate.exists():
+                return None
+            seen.add(normalized)
+            return str(candidate)
+
+        for root in roots:
+            for binary_name in self._binary_names_for_platform(names):
+                candidate = emit(root / binary_name)
+                if candidate:
+                    yield candidate
+
+        if not include_path:
+            return
+
+        for name in names:
+            resolved = shutil.which(name)
+            if resolved:
+                candidate = emit(Path(resolved))
+                if candidate:
+                    yield candidate
+
+        for prefix in self._path_search_roots():
+            for binary_name in self._binary_names_for_platform(names):
+                candidate = emit(prefix / binary_name)
+                if candidate:
+                    yield candidate
+
     def _find_binary(self, names):
+        local_roots = self._local_tool_roots() if os.name in {"nt", "posix"} else []
+        if _is_frozen_app():
+            return _find_binary_in_roots(names, local_roots)
+
+        search_roots = self._path_search_roots()
+
         for name in names:
             resolved = shutil.which(name)
             if resolved:
                 return resolved
 
-        for prefix in (Path("/opt/homebrew/bin"), Path("/usr/local/bin")):
+        for root in local_roots:
             for name in names:
-                candidate = prefix / name
+                candidate = root / (f"{name}.exe" if os.name == "nt" else name)
+                if candidate.exists():
+                    return str(candidate)
+
+        for prefix in search_roots:
+            for name in names:
+                candidate = prefix / (f"{name}.exe" if os.name == "nt" else name)
                 if candidate.exists():
                     return str(candidate)
 
         return None
+
+    def _find_whisper_cpp(self):
+        local_roots = self._local_tool_roots() if os.name in {"nt", "posix"} else []
+        candidates = []
+        for candidate in self._iter_binary_candidates(("whisper-cli", "whisper-cpp"), local_roots):
+            candidates.append((candidate, self._detect_whisper_backend(candidate)))
+
+        if not candidates:
+            return None
+
+        for preferred_backend in ("vulkan", "metal", "cpu"):
+            for candidate, backend in candidates:
+                if backend == preferred_backend:
+                    return candidate
+
+        return candidates[0][0]
+
+    def _ggml_search_dirs(self, binary_dir):
+        search_dirs = [binary_dir]
+        for relative in ("../libexec", "../lib", "libexec", "lib"):
+            candidate = (binary_dir / relative).resolve()
+            if candidate.exists() and candidate not in search_dirs:
+                search_dirs.append(candidate)
+
+        brew = shutil.which("brew")
+        if brew:
+            try:
+                result = subprocess.run(
+                    [brew, "--prefix", "ggml"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=False,
+                )
+            except OSError:
+                result = None
+
+            if result and result.returncode == 0:
+                prefix = Path(result.stdout.strip())
+                for relative in ("libexec", "lib"):
+                    candidate = prefix / relative
+                    if candidate.exists() and candidate not in search_dirs:
+                        search_dirs.append(candidate)
+
+        return search_dirs
+
+    def _has_metal_backend(self, binary_dir):
+        metal_names = ("libggml-metal.so", "libggml-metal.dylib", "libggml-metal.0.dylib")
+        for search_dir in self._ggml_search_dirs(binary_dir):
+            for name in metal_names:
+                if (search_dir / name).exists():
+                    return True
+        return False
+
+    def _detect_whisper_backend(self, whisper_cpp):
+        binary_dir = self._binary_dir(whisper_cpp)
+        if os.name == "nt":
+            for search_dir in self._ggml_search_dirs(binary_dir):
+                if (search_dir / "ggml-vulkan.dll").exists():
+                    return "vulkan"
+            return "cpu"
+
+        if sys.platform == "darwin" and self._has_metal_backend(binary_dir):
+            return "metal"
+
+        return "cpu"
+
+    def _backend_label(self, backend):
+        labels = {
+            "vulkan": "Vulkan GPU",
+            "metal": "Metal GPU",
+            "cpu": "CPU",
+            "cpu-fallback": "CPU fallback",
+        }
+        return labels.get(backend, "CPU")
 
     def _download_model(self, model_name, model_info):
         self.model_dir.mkdir(parents=True, exist_ok=True)
@@ -604,33 +1570,140 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         self._ui(self._set_status, "Preparing audio for whisper.cpp...", "neutral")
         self._ui(self._log, "Converting input to 16 kHz mono WAV...")
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = self._run_command(cmd)
         if result.returncode != 0:
             error_output = result.stderr.strip() or result.stdout.strip() or "Unknown ffmpeg error."
             raise RuntimeError(f"Audio conversion failed.\n{error_output}")
 
         return wav_path
 
-    def _next_output_base(self):
-        original_base = Path(self.output_dir) / Path(self.file_path).stem
-        if not original_base.with_suffix(".txt").exists():
-            return original_base
+    def _resolve_output_paths(self, source_path):
+        source_path = Path(source_path)
+        txt_path = source_path.with_suffix(".txt")
+        if not txt_path.exists():
+            return source_path.with_suffix(""), txt_path
 
         counter = 2
         while True:
-            candidate = original_base.with_name(f"{original_base.name} ({counter})")
-            if not candidate.with_suffix(".txt").exists():
-                self._ui(self._log, f"Existing transcript found. Saving as: {candidate.name}.txt")
-                return candidate
+            alt_txt = source_path.with_name(f"{source_path.stem} ({counter}).txt")
+            if not alt_txt.exists():
+                self._ui(self._log, f"Existing transcript found. Saving as: {alt_txt.name}")
+                return alt_txt.with_suffix(""), alt_txt
             counter += 1
 
-    def _run_whisper_cpp(self, audio_path, model_name, model_path, language):
-        whisper_cpp = self._find_binary(("whisper-cli", "whisper-cpp"))
+    def _command_timed_out(self, result):
+        return bool(getattr(result, "timed_out", False))
+
+    def _command_error_output(self, *results):
+        for result in results:
+            if not result:
+                continue
+            output = (result.stderr or result.stdout or "").strip()
+            if output:
+                return output
+        return "Unknown whisper.cpp error."
+
+    def _vulkan_flash_attn_enabled(self):
+        value = os.environ.get("WHISPERDROP_VULKAN_FLASH_ATTN", "").strip().lower()
+        return value in {"1", "true", "yes", "on"}
+
+    def _backend_extra_args(self, backend):
+        # whisper.cpp enables flash attention by default, which crashes many
+        # Vulkan drivers (NVIDIA/AMD/Intel) mid-run and forces a CPU fallback.
+        # Disable it on Vulkan unless the user explicitly opts back in.
+        if backend == "vulkan" and not self._vulkan_flash_attn_enabled():
+            return ["--no-flash-attn"]
+        return []
+
+    def _summarize_whisper_error(self, output, max_lines=6):
+        if not output:
+            return "Unknown whisper.cpp error."
+
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        if not lines:
+            return "Unknown whisper.cpp error."
+
+        keywords = (
+            "error", "failed", "fail", "exception", "assert", "abort",
+            "devicelost", "device lost", "out of", "not support",
+            "unsupported", "terminate", "vk::",
+        )
+        flagged = [line for line in lines if any(word in line.lower() for word in keywords)]
+        chosen = (flagged or lines)[-max_lines:]
+        return " | ".join(chosen)
+
+    def _gpu_probe_timeout_seconds(self):
+        raw_timeout = os.environ.get("WHISPERDROP_GPU_PROBE_TIMEOUT", "90")
+        try:
+            timeout = int(raw_timeout)
+        except ValueError:
+            timeout = 90
+        return max(15, timeout)
+
+    def _write_probe_wav(self, wav_path):
+        sample_rate = 16000
+        sample_count = sample_rate // 4
+        with wave.open(str(wav_path), "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(b"\0\0" * sample_count)
+
+    def _probe_gpu_backend(self, whisper_cpp, model_path, language, threads, backend):
+        probe_key = (str(Path(whisper_cpp).resolve()), str(Path(model_path).resolve()), backend)
+        if probe_key in self._gpu_probe_results:
+            return self._gpu_probe_results[probe_key]
+
+        backend_label = self._backend_label(backend)
+        timeout = self._gpu_probe_timeout_seconds()
+        self._ui(self._log, f"Checking {backend_label} backend before transcription...")
+
+        with tempfile.TemporaryDirectory(prefix="whisperdrop-gpu-probe-") as probe_dir:
+            probe_dir = Path(probe_dir)
+            probe_audio = probe_dir / "probe.wav"
+            probe_output = probe_dir / "probe"
+            self._write_probe_wav(probe_audio)
+            probe_cmd = [
+                whisper_cpp,
+                "--model",
+                str(model_path),
+                "--file",
+                str(probe_audio),
+                "--threads",
+                str(max(1, min(threads, 4))),
+                "--language",
+                language,
+                "--output-file",
+                str(probe_output),
+                "--output-txt",
+            ] + self._backend_extra_args(backend)
+            result = self._run_command(probe_cmd, timeout=timeout, cwd=self._binary_dir(whisper_cpp))
+
+        if self._command_timed_out(result):
+            self._ui(self._log, f"{backend_label} backend did not become ready within {timeout}s. Retrying on CPU...")
+            self._gpu_probe_results[probe_key] = False
+            return False
+
+        if result.returncode != 0:
+            summary = self._summarize_whisper_error(self._command_error_output(result))
+            self._ui(self._log, f"{backend_label} backend failed probe. Retrying on CPU... ({summary})")
+            self._gpu_probe_results[probe_key] = False
+            return False
+
+        self._gpu_probe_results[probe_key] = True
+        return True
+
+    def _run_whisper_cpp(self, source_path, audio_path, model_name, model_path, language):
+        whisper_cpp = self._find_whisper_cpp()
         if not whisper_cpp:
             raise RuntimeError("whisper.cpp was not found. Run setup again to install it.")
 
-        output_base = self._next_output_base()
+        output_base, output_file = self._resolve_output_paths(source_path)
         threads = max(1, min(8, os.cpu_count() or 4))
+        backend = self._detect_whisper_backend(whisper_cpp)
+        if backend == "vulkan" and not self._probe_gpu_backend(whisper_cpp, model_path, language, threads, backend):
+            backend = "cpu-fallback"
+
         cmd = [
             whisper_cpp,
             "--model",
@@ -644,25 +1717,66 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             "--output-file",
             str(output_base),
             "--output-txt",
-        ]
+            "--no-prints",
+        ] + self._backend_extra_args(backend)
 
         self._ui(self._set_status, f"Transcribing with {model_name}...", "neutral")
-        self._ui(self._log, f"Starting whisper.cpp with model '{model_name}'.")
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        backend_label = self._backend_label(backend)
+        self._ui(self._log, f"Starting whisper.cpp with {backend_label} backend.")
+        run_cmd = cmd + ["--no-gpu"] if backend == "cpu-fallback" else cmd
+        result = self._run_command_stream(run_cmd, cwd=self._binary_dir(whisper_cpp), log_filter=self._transcript_log_line)
 
         if result.returncode != 0:
-            error_output = result.stderr.strip() or result.stdout.strip() or "Unknown whisper.cpp error."
-            raise RuntimeError(error_output)
+            if backend in {"vulkan", "metal"}:
+                summary = self._summarize_whisper_error(self._command_error_output(result))
+                self._ui(self._log, f"{backend_label} backend failed. Retrying on CPU... ({summary})")
+                cpu_cmd = cmd + ["--no-gpu"]
+                cpu_result = self._run_command_stream(
+                    cpu_cmd,
+                    cwd=self._binary_dir(whisper_cpp),
+                    log_filter=self._transcript_log_line,
+                )
+                if cpu_result.returncode == 0:
+                    result = cpu_result
+                    backend = "cpu-fallback"
+                else:
+                    error_output = self._command_error_output(cpu_result, result)
+                    raise RuntimeError(error_output)
+            else:
+                error_output = self._command_error_output(result)
+                raise RuntimeError(error_output)
 
-        output_file = output_base.with_suffix(".txt")
         if not output_file.exists():
-            raise RuntimeError("whisper.cpp finished without creating the transcript file.")
+            matches = sorted(source_path.parent.glob(f"{source_path.stem}*.txt"))
+            if matches:
+                output_file = matches[0]
+            else:
+                raise RuntimeError("whisper.cpp finished without creating the transcript file.")
 
-        cli_output = (result.stdout or result.stderr or "").strip()
-        if cli_output:
-            self._ui(self._log, cli_output)
+        if backend == "cpu-fallback":
+            self._ui(self._log, "Transcription completed on CPU fallback.")
+        elif backend in {"vulkan", "metal"}:
+            self._ui(self._log, f"Transcription completed with {self._backend_label(backend)} backend.")
 
         return output_file
+
+    def _open_output_dirs(self, output_dirs):
+        unique_dirs = sorted({str(Path(path)) for path in output_dirs})
+        if len(unique_dirs) != 1:
+            if len(unique_dirs) > 1:
+                self._ui(self._log, f"Transcripts saved across {len(unique_dirs)} folders.")
+            return
+
+        try:
+            output_dir = unique_dirs[0]
+            if os.name == "nt":
+                os.startfile(output_dir)
+            elif sys.platform == "darwin":
+                subprocess.run(["open", output_dir], check=False)
+            else:
+                subprocess.run(["xdg-open", output_dir], check=False)
+        except Exception:
+            self._ui(self._log, "Transcript saved. Could not open the output folder automatically.")
 
     def _set_busy(self, busy):
         if busy:
@@ -671,6 +1785,11 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             self.run_btn.config(cursor="")
             self.run_btn.unbind("<Button-1>")
             self.run_btn_frame.unbind("<Button-1>")
+            self.youtube_entry.config(state="disabled")
+            self.youtube_btn.config(text="Load Playlist  ▶️", fg=MUTED, cursor="")
+            self.youtube_btn_frame.config(cursor="")
+            self.youtube_btn.unbind("<Button-1>")
+            self.youtube_btn_frame.unbind("<Button-1>")
             self.progress.grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 10))
             self.progress.start(10)
             self._set_status("Transcription in progress...", "neutral")
@@ -680,12 +1799,17 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             self.run_btn.config(cursor="hand2")
             self.run_btn.bind("<Button-1>", lambda e: self._run_transcription())
             self.run_btn_frame.bind("<Button-1>", lambda e: self._run_transcription())
+            self.youtube_entry.config(state="normal")
+            self.youtube_btn.config(text="Load Playlist  ▶️", fg=GREEN, cursor="hand2")
+            self.youtube_btn_frame.config(cursor="hand2")
+            self.youtube_btn.bind("<Button-1>", lambda _e: self._load_youtube_playlist())
+            self.youtube_btn_frame.bind("<Button-1>", lambda _e: self._load_youtube_playlist())
             self.progress.stop()
             self.progress.grid_forget()
 
     def _run_transcription(self):
-        if not self.file_path:
-            messagebox.showwarning("No file", "Please select a file first.")
+        if not self.file_paths and not self.youtube_entries:
+            messagebox.showwarning("No input", "Select local files or load a YouTube playlist first.")
             return
 
         self._set_busy(True)
@@ -697,14 +1821,65 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             model_name = self.model_var.get()
             model_info = MODELS[model_name]
             model_path = self._download_model(model_name, model_info)
+            saved_outputs = []
+            failed_files = []
 
-            with tempfile.TemporaryDirectory(prefix="transcriber-") as temp_dir:
-                audio_path = self._prepare_audio(self.file_path, temp_dir)
-                output_file = self._run_whisper_cpp(audio_path, model_name, model_path, language)
+            if self.youtube_entries:
+                playlist_dir = self.download_dir / self._sanitize_folder_name(self.youtube_playlist_title)
+                self._ui(self._log, f"Saving YouTube downloads and transcripts to: {playlist_dir}")
+                total_items = len(self.youtube_entries)
+                for index, entry in enumerate(self.youtube_entries, start=1):
+                    self._ui(self._log, "")
+                    self._ui(self._log, f"[{index}/{total_items}] YouTube: {entry['title']}")
+                    try:
+                        source_path = self._download_youtube_audio(entry, playlist_dir)
+                        with tempfile.TemporaryDirectory(prefix="transcriber-") as temp_dir:
+                            audio_path = self._prepare_audio(source_path, temp_dir)
+                            output_file = self._run_whisper_cpp(source_path, audio_path, model_name, model_path, language)
+                        saved_outputs.append(output_file)
+                        self._ui(self._log, f"Saved: {output_file}")
+                    except Exception as exc:
+                        failed_files.append((Path(entry["title"]), str(exc)))
+                        self._ui(self._log, f"Error while processing {entry['title']}:\n{exc}")
+            else:
+                selected_files = [Path(path) for path in self.file_paths]
+                for index, source_path in enumerate(selected_files, start=1):
+                    self._ui(self._log, "")
+                    self._ui(self._log, f"[{index}/{len(selected_files)}] Processing: {source_path.name}")
+                    try:
+                        with tempfile.TemporaryDirectory(prefix="transcriber-") as temp_dir:
+                            audio_path = self._prepare_audio(source_path, temp_dir)
+                            output_file = self._run_whisper_cpp(source_path, audio_path, model_name, model_path, language)
+                        saved_outputs.append(output_file)
+                        self._ui(self._log, f"Saved: {output_file}")
+                    except Exception as exc:
+                        failed_files.append((source_path, str(exc)))
+                        self._ui(self._log, f"Error while processing {source_path.name}:\n{exc}")
 
-            self._ui(self._log, f"Saved: {output_file}")
-            self._ui(self._set_status, "Done. Transcript saved next to the original file.", "success")
-            subprocess.run(["open", self.output_dir], check=False)
+            if saved_outputs:
+                self._open_output_dirs([output.parent for output in saved_outputs])
+
+            if failed_files:
+                self._ui(self._log, "")
+                self._ui(self._log, "Some files could not be transcribed:")
+                for source_path, error_text in failed_files:
+                    summary = error_text.splitlines()[0] if error_text else "Unknown error."
+                    self._ui(self._log, f"  - {source_path.name}: {summary}")
+
+                if saved_outputs:
+                    self._ui(
+                        self._set_status,
+                        f"Completed with errors. Saved {len(saved_outputs)} transcript(s), failed {len(failed_files)}.",
+                        "error",
+                    )
+                else:
+                    self._ui(self._set_status, "Transcription failed for all selected files. Check the log.", "error")
+            else:
+                self._ui(
+                    self._set_status,
+                    f"Done. Saved {len(saved_outputs)} transcript(s) next to the original file(s).",
+                    "success",
+                )
         except Exception as exc:
             self._ui(self._log, f"Error:\n{exc}")
             self._ui(self._set_status, "Transcription failed. Check the log.", "error")
@@ -713,6 +1888,9 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
 
 if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        raise SystemExit(_run_self_test())
+
     app = TranscriberApp()
     app.lift()
     app.attributes("-topmost", True)
