@@ -87,6 +87,11 @@ else:
 
 SCROLLBAR_WIDTH = 10
 THUMB_MIN_HEIGHT = 30
+WINDOW_EDGE_GAP = 24
+WINDOW_MIN_WIDTH = 420
+WINDOW_MIN_HEIGHT = 300
+WINDOW_COMPACT_WIDTH = 900
+WINDOW_NARROW_OPTIONS_WIDTH = 640
 YOUTUBE_URL_PATTERN = re.compile(
     r"^https?://(?:www\.|music\.)?(?:youtube\.com/(?:watch\?[^#]*?v=|playlist\?|shorts/)|youtu\.be/)[^\s]+$",
     re.IGNORECASE,
@@ -357,20 +362,39 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
                 return rect.right - rect.left, rect.bottom - rect.top
         return self.winfo_screenwidth(), self.winfo_screenheight()
 
+    @staticmethod
+    def _calculate_window_geometry(work_w, work_h, is_windows):
+        work_w = max(1, int(work_w))
+        work_h = max(1, int(work_h))
+        edge_gap = WINDOW_EDGE_GAP if is_windows else 16
+        max_w = max(1, work_w - edge_gap)
+        max_h = max(1, work_h - edge_gap)
+
+        if is_windows:
+            preferred_w = min(1280, max(980, work_w - 120))
+            preferred_h = min(900, max(760, work_h - 120))
+            minimum_w = min(max_w, max(WINDOW_MIN_WIDTH, work_w - 80))
+            minimum_h = min(max_h, max(WINDOW_MIN_HEIGHT, work_h - 80))
+        else:
+            preferred_w = min(1280, max(960, work_w - 48))
+            preferred_h = min(920, max(720, work_h - 36))
+            minimum_w = min(max_w, max(WINDOW_MIN_WIDTH, work_w - 64))
+            minimum_h = min(max_h, max(WINDOW_MIN_HEIGHT, work_h - 64))
+
+        target_w = min(max_w, max(minimum_w, preferred_w))
+        target_h = min(max_h, max(minimum_h, preferred_h))
+        minimum_w = min(minimum_w, target_w)
+        minimum_h = min(minimum_h, target_h)
+
+        return target_w, target_h, minimum_w, minimum_h
+
     def _configure_window_size(self):
         work_w, work_h = self._get_work_area()
-        if os.name == "nt":
-            target_w = min(1280, max(980, work_w - 120))
-            target_h = min(900, max(760, work_h - 120))
-        else:
-            target_w = min(1280, max(960, work_w - 48))
-            target_h = min(920, max(720, work_h - 36))
-        min_w = min(960, max(820, work_w - 80))
-        min_h = min(700, max(620, work_h - 80))
+        target_w, target_h, min_w, min_h = self._calculate_window_geometry(work_w, work_h, os.name == "nt")
         self._base_min_width = min_w
         self._base_min_height = min_h
-        pos_x = max(20, (work_w - target_w) // 2)
-        pos_y = max(20, (work_h - target_h) // 2)
+        pos_x = max(0, (work_w - target_w) // 2)
+        pos_y = max(0, (work_h - target_h) // 2)
 
         self.geometry(f"{target_w}x{target_h}+{pos_x}+{pos_y}")
         self.minsize(min_w, min_h)
@@ -383,15 +407,17 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         current_h = self.winfo_height()
         required_w = self.winfo_reqwidth()
         required_h = self.winfo_reqheight()
+        max_w = max(1, work_w - WINDOW_EDGE_GAP)
+        max_h = max(1, work_h - WINDOW_EDGE_GAP)
 
         if os.name == "nt":
-            target_w = min(work_w - 40, max(self._base_min_width, required_w + 24))
-            target_h = min(work_h - 40, max(self._base_min_height, required_h + 48))
+            target_w = min(max_w, max(current_w, self._base_min_width, required_w + 24))
+            target_h = min(max_h, max(current_h, self._base_min_height, required_h + 24))
         else:
-            target_w = min(work_w - 24, max(current_w, required_w))
-            target_h = min(work_h - 24, max(current_h, required_h))
-        pos_x = max(12, (work_w - target_w) // 2)
-        pos_y = max(12, (work_h - target_h) // 2)
+            target_w = min(max_w, max(current_w, required_w))
+            target_h = min(max_h, max(current_h, required_h))
+        pos_x = max(0, (work_w - target_w) // 2)
+        pos_y = max(0, (work_h - target_h) // 2)
 
         self.geometry(f"{target_w}x{target_h}+{pos_x}+{pos_y}")
         self.minsize(self._base_min_width, self._base_min_height)
@@ -428,8 +454,20 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        root = tk.Frame(self, bg=BG, padx=28, pady=24)
-        root.grid(sticky="nsew")
+        self._main_canvas = tk.Canvas(self, bg=BG, highlightthickness=0, bd=0)
+        self._main_canvas.grid(row=0, column=0, sticky="nsew")
+        self._main_scrollbar = ttk.Scrollbar(self, orient="vertical", command=self._main_canvas.yview)
+        self._main_scrollbar.grid(row=0, column=1, sticky="ns")
+        self._main_canvas.configure(yscrollcommand=self._main_scrollbar.set)
+
+        root = tk.Frame(self._main_canvas, bg=BG, padx=28, pady=24)
+        self._content_root = root
+        self._content_window = self._main_canvas.create_window((0, 0), window=root, anchor="nw")
+        self._main_canvas.bind("<Configure>", self._on_main_canvas_configure)
+        root.bind("<Configure>", self._on_main_content_configure)
+        self.bind_all("<MouseWheel>", self._on_main_mousewheel, add="+")
+        self.bind_all("<Button-4>", self._on_main_mousewheel, add="+")
+        self.bind_all("<Button-5>", self._on_main_mousewheel, add="+")
 
         root.grid_columnconfigure(0, weight=1, uniform="col")
         root.grid_columnconfigure(1, weight=1, uniform="col")
@@ -439,33 +477,35 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         root.grid_rowconfigure(3, weight=1)
 
         # ── Header ───────────────────────────────────────────────────────────
-        header = tk.Frame(root, bg=BG)
-        header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 18))
-        header.grid_columnconfigure(0, weight=1)
+        self._header = tk.Frame(root, bg=BG)
+        self._header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 18))
+        self._header.grid_columnconfigure(0, weight=1)
 
         tk.Label(
-            header,
+            self._header,
             text="WhisperDrop",
             font=(UI_FONT, 24, "bold"),
             bg=BG,
             fg=TEXT,
         ).grid(row=0, column=0, sticky="w")
-        tk.Label(
-            header,
+        self._header_subtitle = tk.Label(
+            self._header,
             text="whisper.cpp backend with quantized GGML models for lower-end hardware.",
             font=(UI_FONT, 13),
             bg=BG,
             fg=MUTED,
-        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
-        tk.Frame(header, bg=GREEN, height=3, width=96).grid(row=2, column=0, sticky="w", pady=(14, 0))
+            justify="left",
+        )
+        self._header_subtitle.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        tk.Frame(self._header, bg=GREEN, height=3, width=96).grid(row=2, column=0, sticky="w", pady=(14, 0))
 
         # ── File card ─────────────────────────────────────────────────────────
-        file_card = tk.Frame(root, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
-        file_card.grid(row=1, column=0, sticky="ew", padx=(0, 10))
-        file_card.grid_columnconfigure(0, weight=1)
+        self._file_card = tk.Frame(root, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
+        self._file_card.grid(row=1, column=0, sticky="ew", padx=(0, 10))
+        self._file_card.grid_columnconfigure(0, weight=1)
 
         tk.Label(
-            file_card,
+            self._file_card,
             text="File",
             font=(UI_FONT, 15, "bold"),
             bg=CARD,
@@ -473,7 +513,7 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         ).grid(row=0, column=0, sticky="w", padx=18, pady=(16, 6))
 
         self.drop_zone = tk.Frame(
-            file_card,
+            self._file_card,
             bg=BG,
             highlightbackground=BORDER,
             highlightthickness=1,
@@ -517,7 +557,7 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             self.drop_zone.drop_target_register(DND_FILES)
             self.drop_zone.dnd_bind("<<Drop>>", self._on_drop)
 
-        browse_row = tk.Frame(file_card, bg=CARD)
+        browse_row = tk.Frame(self._file_card, bg=CARD)
         browse_row.grid(row=2, column=0, sticky="ew", padx=18, pady=(14, 12))
         browse_row.grid_columnconfigure(0, weight=1)
 
@@ -547,11 +587,11 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self.browse_btn.bind("<Enter>", lambda e: (self.browse_btn_frame.config(bg="#0f2e1a"), self.browse_btn.config(bg="#0f2e1a")))
         self.browse_btn.bind("<Leave>", lambda e: (self.browse_btn_frame.config(bg=GREEN_SOFT), self.browse_btn.config(bg=GREEN_SOFT)))
 
-        file_info = tk.Frame(file_card, bg=CARD)
+        file_info = tk.Frame(self._file_card, bg=CARD)
         file_info.grid(row=3, column=0, sticky="ew", padx=18, pady=(0, 18))
         file_info.grid_columnconfigure(0, weight=1)
 
-        tk.Label(
+        self.file_label = tk.Label(
             file_info,
             textvariable=self.file_var,
             font=(UI_FONT, 13, "bold"),
@@ -559,7 +599,8 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             fg=TEXT,
             anchor="w",
             justify="left",
-        ).grid(row=0, column=0, sticky="ew")
+        )
+        self.file_label.grid(row=0, column=0, sticky="ew")
         self.file_help_label = tk.Label(
             file_info,
             textvariable=self.file_help_var,
@@ -571,7 +612,7 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         )
         self.file_help_label.grid(row=1, column=0, sticky="ew", pady=(4, 0))
 
-        youtube_section = tk.Frame(file_card, bg=CARD)
+        youtube_section = tk.Frame(self._file_card, bg=CARD)
         youtube_section.grid(row=4, column=0, sticky="ew", padx=18, pady=(0, 18))
         youtube_section.grid_columnconfigure(0, weight=1)
 
@@ -643,23 +684,23 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self.youtube_help_label.grid(row=3, column=0, sticky="ew", pady=(10, 0))
 
         # ── Options ───────────────────────────────────────────────────────────
-        options = tk.Frame(root, bg=BG)
-        options.grid(row=2, column=0, sticky="ew", padx=(0, 10), pady=(18, 18))
-        options.grid_columnconfigure(0, weight=1)
-        options.grid_columnconfigure(1, weight=1)
-        options.grid_rowconfigure(0, weight=1)
+        self._options_frame = tk.Frame(root, bg=BG)
+        self._options_frame.grid(row=2, column=0, sticky="ew", padx=(0, 10), pady=(18, 18))
+        self._options_frame.grid_columnconfigure(0, weight=1)
+        self._options_frame.grid_columnconfigure(1, weight=1)
+        self._options_frame.grid_rowconfigure(0, weight=1)
 
-        lang_card = tk.Frame(options, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
-        lang_card.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        self._lang_card = tk.Frame(self._options_frame, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
+        self._lang_card.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         tk.Label(
-            lang_card,
+            self._lang_card,
             text="Language",
             font=(UI_FONT, 15, "bold"),
             bg=CARD,
             fg=TEXT,
         ).pack(anchor="w", padx=16, pady=(14, 6))
         self.lang_menu = ttk.Combobox(
-            lang_card,
+            self._lang_card,
             textvariable=self.lang_var,
             values=list(LANGUAGES.keys()),
             state="readonly",
@@ -668,17 +709,17 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         )
         self.lang_menu.pack(fill="x", padx=16, pady=(0, 14))
 
-        model_card = tk.Frame(options, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
-        model_card.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        self._model_card = tk.Frame(self._options_frame, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
+        self._model_card.grid(row=0, column=1, sticky="ew", padx=(8, 0))
         tk.Label(
-            model_card,
+            self._model_card,
             text="Model",
             font=(UI_FONT, 15, "bold"),
             bg=CARD,
             fg=TEXT,
         ).pack(anchor="w", padx=16, pady=(14, 6))
         self.model_menu = ttk.Combobox(
-            model_card,
+            self._model_card,
             textvariable=self.model_var,
             values=list(MODELS.keys()),
             state="readonly",
@@ -687,8 +728,8 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         )
         self.model_menu.pack(fill="x", padx=16, pady=(0, 8))
         self.model_menu.bind("<<ComboboxSelected>>", self._on_model_change)
-        tk.Label(
-            model_card,
+        self.model_help_label = tk.Label(
+            self._model_card,
             textvariable=self.model_help_var,
             font=(UI_FONT, 10),
             bg=CARD,
@@ -696,15 +737,16 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             wraplength=260,
             justify="left",
             anchor="w",
-        ).pack(fill="x", padx=16, pady=(0, 14))
+        )
+        self.model_help_label.pack(fill="x", padx=16, pady=(0, 14))
 
         # ── Action card ───────────────────────────────────────────────────────
-        action_card = tk.Frame(root, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
-        action_card.grid(row=3, column=0, sticky="nsew", padx=(0, 10))
-        action_card.grid_columnconfigure(0, weight=1)
+        self._action_card = tk.Frame(root, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
+        self._action_card.grid(row=3, column=0, sticky="nsew", padx=(0, 10))
+        self._action_card.grid_columnconfigure(0, weight=1)
 
         self.run_btn_frame = tk.Frame(
-            action_card,
+            self._action_card,
             bg=GREEN_SOFT,
             highlightbackground=GREEN,
             highlightthickness=1,
@@ -730,10 +772,10 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self.run_btn.bind("<Enter>", lambda e: (self.run_btn_frame.config(bg="#0f2e1a"), self.run_btn.config(bg="#0f2e1a")))
         self.run_btn.bind("<Leave>", lambda e: (self.run_btn_frame.config(bg=GREEN_SOFT), self.run_btn.config(bg=GREEN_SOFT)))
 
-        self.progress = ttk.Progressbar(action_card, mode="indeterminate", style="App.Horizontal.TProgressbar")
+        self.progress = ttk.Progressbar(self._action_card, mode="indeterminate", style="App.Horizontal.TProgressbar")
 
         self.status_label = tk.Label(
-            action_card,
+            self._action_card,
             textvariable=self.status_var,
             font=(UI_FONT, 11),
             bg=BG,
@@ -746,20 +788,20 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self.status_label.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 18))
 
         # ── Log card (right column, spans rows 1-3) ───────────────────────────
-        log_card = tk.Frame(root, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
-        log_card.grid(row=1, column=1, rowspan=3, sticky="nsew", padx=(10, 0))
-        log_card.grid_columnconfigure(0, weight=1)
-        log_card.grid_rowconfigure(1, weight=1)
+        self._log_card = tk.Frame(root, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
+        self._log_card.grid(row=1, column=1, rowspan=3, sticky="nsew", padx=(10, 0))
+        self._log_card.grid_columnconfigure(0, weight=1)
+        self._log_card.grid_rowconfigure(1, weight=1)
 
         tk.Label(
-            log_card,
+            self._log_card,
             text="Log",
             font=(UI_FONT, 15, "bold"),
             bg=CARD,
             fg=TEXT,
         ).grid(row=0, column=0, sticky="w", padx=18, pady=(16, 8))
 
-        log_frame = tk.Frame(log_card, bg=BG)
+        log_frame = tk.Frame(self._log_card, bg=BG)
         log_frame.grid(row=1, column=0, sticky="nsew", padx=18, pady=(0, 18))
         log_frame.grid_columnconfigure(0, weight=1)
         log_frame.grid_rowconfigure(0, weight=1)
@@ -805,6 +847,108 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
         self._set_status("Ready", "neutral")
         self._log("Ready. whisper.cpp backend is active.")
         self._log("You can load local files or paste a YouTube playlist link.")
+        self._apply_responsive_layout(self.winfo_width())
+
+    def _on_main_content_configure(self, _event=None):
+        bbox = self._main_canvas.bbox("all")
+        if bbox:
+            self._main_canvas.configure(scrollregion=bbox)
+        self._sync_main_scrollbar()
+
+    def _on_main_canvas_configure(self, event):
+        self._main_canvas.itemconfigure(self._content_window, width=event.width)
+        self._apply_responsive_layout(event.width)
+        self._sync_main_scrollbar()
+
+    def _sync_main_scrollbar(self):
+        bbox = self._main_canvas.bbox("all")
+        canvas_h = self._main_canvas.winfo_height()
+        content_h = 0 if not bbox else bbox[3] - bbox[1]
+        if content_h > canvas_h + 1:
+            if not self._main_scrollbar.winfo_ismapped():
+                self._main_scrollbar.grid(row=0, column=1, sticky="ns")
+        else:
+            if self._main_scrollbar.winfo_ismapped():
+                self._main_scrollbar.grid_remove()
+            self._main_canvas.yview_moveto(0)
+
+    def _on_main_mousewheel(self, event):
+        if self._is_descendant(event.widget, self.log) or self._is_descendant(event.widget, self._scroll_canvas):
+            return None
+        bbox = self._main_canvas.bbox("all")
+        if not bbox or bbox[3] - bbox[1] <= self._main_canvas.winfo_height() + 1:
+            return None
+        if getattr(event, "num", None) == 4:
+            delta = -1
+        elif getattr(event, "num", None) == 5:
+            delta = 1
+        else:
+            delta = -1 if event.delta > 0 else 1
+        self._main_canvas.yview_scroll(delta * 3, "units")
+        return "break"
+
+    def _is_descendant(self, widget, ancestor):
+        while widget is not None:
+            if widget == ancestor:
+                return True
+            widget = getattr(widget, "master", None)
+        return False
+
+    def _apply_responsive_layout(self, available_width):
+        if not hasattr(self, "_content_root"):
+            return
+
+        compact = available_width < WINDOW_COMPACT_WIDTH
+        narrow_options = available_width < WINDOW_NARROW_OPTIONS_WIDTH
+        pad = 10 if available_width < 520 else 16 if compact else 28
+        self._content_root.configure(padx=pad, pady=max(10, pad - 4))
+
+        if compact:
+            self._content_root.grid_columnconfigure(0, weight=1, uniform="")
+            self._content_root.grid_columnconfigure(1, weight=0, uniform="")
+            self._header.grid_configure(columnspan=1)
+            self._file_card.grid_configure(row=1, column=0, sticky="ew", padx=0)
+            self._options_frame.grid_configure(row=2, column=0, sticky="ew", padx=0, pady=(14, 14))
+            self._action_card.grid_configure(row=3, column=0, sticky="ew", padx=0)
+            self._log_card.grid_configure(row=4, column=0, rowspan=1, sticky="nsew", padx=0, pady=(14, 0))
+            self._content_root.grid_rowconfigure(3, weight=0)
+            self._content_root.grid_rowconfigure(4, weight=1)
+        else:
+            self._content_root.grid_columnconfigure(0, weight=1, uniform="col")
+            self._content_root.grid_columnconfigure(1, weight=1, uniform="col")
+            self._header.grid_configure(columnspan=2)
+            self._file_card.grid_configure(row=1, column=0, sticky="ew", padx=(0, 10))
+            self._options_frame.grid_configure(row=2, column=0, sticky="ew", padx=(0, 10), pady=(18, 18))
+            self._action_card.grid_configure(row=3, column=0, sticky="nsew", padx=(0, 10))
+            self._log_card.grid_configure(row=1, column=1, rowspan=3, sticky="nsew", padx=(10, 0), pady=0)
+            self._content_root.grid_rowconfigure(3, weight=1)
+            self._content_root.grid_rowconfigure(4, weight=0)
+
+        if narrow_options:
+            self._options_frame.grid_columnconfigure(0, weight=1)
+            self._options_frame.grid_columnconfigure(1, weight=0)
+            self._lang_card.grid_configure(row=0, column=0, sticky="ew", padx=0, pady=(0, 10))
+            self._model_card.grid_configure(row=1, column=0, sticky="ew", padx=0, pady=0)
+        else:
+            self._options_frame.grid_columnconfigure(0, weight=1)
+            self._options_frame.grid_columnconfigure(1, weight=1)
+            self._lang_card.grid_configure(row=0, column=0, sticky="nsew", padx=(0, 8), pady=0)
+            self._model_card.grid_configure(row=0, column=1, sticky="ew", padx=(8, 0), pady=0)
+
+        self._refresh_wraplengths(available_width, pad, compact)
+
+    def _refresh_wraplengths(self, available_width, pad, compact):
+        column_width = available_width - (pad * 2)
+        if not compact:
+            column_width = (available_width - (pad * 2) - 20) // 2
+        wrap = max(220, column_width - 56)
+
+        self._header_subtitle.configure(wraplength=max(240, available_width - (pad * 2)))
+        self.file_label.configure(wraplength=wrap)
+        self.file_help_label.configure(wraplength=wrap)
+        self.youtube_help_label.configure(wraplength=wrap)
+        self.model_help_label.configure(wraplength=wrap if compact else max(220, column_width - 48))
+        self.status_label.configure(wraplength=wrap)
 
     def _update_scrollbar(self, top, bottom):
         self._scroll_top = float(top)
@@ -874,6 +1018,7 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
     def _browse_file(self, event=None):
         paths = filedialog.askopenfilenames(
+            parent=self,
             title="Select audio or video files",
             filetypes=[("Audio and video", "*.mp3 *.wav *.m4a *.ogg *.flac *.opus *.webm *.mp4 *.aac")],
         )

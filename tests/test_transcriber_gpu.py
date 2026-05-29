@@ -7,6 +7,24 @@ from unittest.mock import patch
 from transcriber import TranscriberApp
 
 
+class WindowGeometryTests(unittest.TestCase):
+    def test_windows_geometry_fits_small_work_area(self):
+        target_w, target_h, min_w, min_h = TranscriberApp._calculate_window_geometry(640, 480, True)
+
+        self.assertLessEqual(target_w, 640)
+        self.assertLessEqual(target_h, 480)
+        self.assertLessEqual(min_w, target_w)
+        self.assertLessEqual(min_h, target_h)
+
+    def test_windows_geometry_allows_very_small_work_area(self):
+        target_w, target_h, min_w, min_h = TranscriberApp._calculate_window_geometry(480, 320, True)
+
+        self.assertLessEqual(target_w, 480)
+        self.assertLessEqual(target_h, 320)
+        self.assertLessEqual(min_w, target_w)
+        self.assertLessEqual(min_h, target_h)
+
+
 @unittest.skipUnless(os.name == "nt", "Vulkan backend selection is Windows-specific")
 class WhisperGpuSelectionTests(unittest.TestCase):
     def _app_for(self, root):
