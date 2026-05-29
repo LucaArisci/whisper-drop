@@ -68,5 +68,51 @@ class WhisperGpuSelectionTests(unittest.TestCase):
                 self.assertEqual(Path(app._find_whisper_cpp()).resolve(), path_whisper.resolve())
 
 
+class WhisperFlashAttnTests(unittest.TestCase):
+    def _app(self):
+        return object.__new__(TranscriberApp)
+
+    def test_vulkan_disables_flash_attn_by_default(self):
+        app = self._app()
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("WHISPERDROP_VULKAN_FLASH_ATTN", None)
+            self.assertIn("--no-flash-attn", app._backend_extra_args("vulkan"))
+
+    def test_vulkan_flash_attn_opt_in(self):
+        app = self._app()
+        with patch.dict(os.environ, {"WHISPERDROP_VULKAN_FLASH_ATTN": "1"}):
+            self.assertEqual(app._backend_extra_args("vulkan"), [])
+
+    def test_cpu_keeps_default_flash_attn(self):
+        app = self._app()
+        self.assertEqual(app._backend_extra_args("cpu"), [])
+
+    def test_metal_keeps_default_flash_attn(self):
+        app = self._app()
+        self.assertEqual(app._backend_extra_args("metal"), [])
+
+
+class WhisperErrorSummaryTests(unittest.TestCase):
+    def _app(self):
+        return object.__new__(TranscriberApp)
+
+    def test_picks_error_lines_over_device_banner(self):
+        app = self._app()
+        output = (
+            "ggml_vulkan: Found 1 Vulkan devices:\n"
+            "ggml_vulkan: 0 = NVIDIA GeForce RTX 4060\n"
+            "whisper_model_load: loading model\n"
+            "terminate called after throwing an instance of 'vk::DeviceLostError'\n"
+            "  what():  vk::Queue::submit: ErrorDeviceLost"
+        )
+        summary = app._summarize_whisper_error(output)
+        self.assertIn("DeviceLost", summary)
+        self.assertNotIn("Found 1 Vulkan devices", summary)
+
+    def test_handles_empty_output(self):
+        app = self._app()
+        self.assertEqual(app._summarize_whisper_error(""), "Unknown whisper.cpp error.")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1603,6 +1603,35 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
                 return output
         return "Unknown whisper.cpp error."
 
+    def _vulkan_flash_attn_enabled(self):
+        value = os.environ.get("WHISPERDROP_VULKAN_FLASH_ATTN", "").strip().lower()
+        return value in {"1", "true", "yes", "on"}
+
+    def _backend_extra_args(self, backend):
+        # whisper.cpp enables flash attention by default, which crashes many
+        # Vulkan drivers (NVIDIA/AMD/Intel) mid-run and forces a CPU fallback.
+        # Disable it on Vulkan unless the user explicitly opts back in.
+        if backend == "vulkan" and not self._vulkan_flash_attn_enabled():
+            return ["--no-flash-attn"]
+        return []
+
+    def _summarize_whisper_error(self, output, max_lines=6):
+        if not output:
+            return "Unknown whisper.cpp error."
+
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        if not lines:
+            return "Unknown whisper.cpp error."
+
+        keywords = (
+            "error", "failed", "fail", "exception", "assert", "abort",
+            "devicelost", "device lost", "out of", "not support",
+            "unsupported", "terminate", "vk::",
+        )
+        flagged = [line for line in lines if any(word in line.lower() for word in keywords)]
+        chosen = (flagged or lines)[-max_lines:]
+        return " | ".join(chosen)
+
     def _gpu_probe_timeout_seconds(self):
         raw_timeout = os.environ.get("WHISPERDROP_GPU_PROBE_TIMEOUT", "90")
         try:
@@ -1647,7 +1676,7 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
                 "--output-file",
                 str(probe_output),
                 "--output-txt",
-            ]
+            ] + self._backend_extra_args(backend)
             result = self._run_command(probe_cmd, timeout=timeout, cwd=self._binary_dir(whisper_cpp))
 
         if self._command_timed_out(result):
@@ -1656,9 +1685,8 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             return False
 
         if result.returncode != 0:
-            error_output = self._command_error_output(result)
-            first_line = error_output.splitlines()[0] if error_output else "Unknown whisper.cpp error."
-            self._ui(self._log, f"{backend_label} backend failed probe. Retrying on CPU... ({first_line})")
+            summary = self._summarize_whisper_error(self._command_error_output(result))
+            self._ui(self._log, f"{backend_label} backend failed probe. Retrying on CPU... ({summary})")
             self._gpu_probe_results[probe_key] = False
             return False
 
@@ -1690,7 +1718,7 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
             str(output_base),
             "--output-txt",
             "--no-prints",
-        ]
+        ] + self._backend_extra_args(backend)
 
         self._ui(self._set_status, f"Transcribing with {model_name}...", "neutral")
         backend_label = self._backend_label(backend)
@@ -1700,7 +1728,8 @@ class TranscriberApp(TkinterDnD.Tk if HAS_DND else tk.Tk):
 
         if result.returncode != 0:
             if backend in {"vulkan", "metal"}:
-                self._ui(self._log, f"{backend_label} backend failed. Retrying on CPU...")
+                summary = self._summarize_whisper_error(self._command_error_output(result))
+                self._ui(self._log, f"{backend_label} backend failed. Retrying on CPU... ({summary})")
                 cpu_cmd = cmd + ["--no-gpu"]
                 cpu_result = self._run_command_stream(
                     cpu_cmd,
